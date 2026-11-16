@@ -10,7 +10,8 @@
 | Отдельный Telegram-аккаунт | им будет управлять ИИ. Основной аккаунт не используйте |
 | Ваш основной аккаунт | владелец: с него вы даёте боту поручения |
 | `api_id` / `api_hash` | приложение на [my.telegram.org](https://my.telegram.org/apps): Platform — Desktop, short name без дефиса. Можно создать на любом своём аккаунте |
-| Linux с systemd, Python ≥ 3.10, `git`, [`uv`](https://docs.astral.sh/uv/getting-started/installation/) | сервер и диспетчер |
+| Linux с systemd, Python ≥ 3.10, `git`, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), `ffmpeg` | сервер, диспетчер, расшифровка голосовых |
+| ~1 ГБ на диске сверх telegram-mcp | `asr-server`: окружение 160 МБ + модель GigaAM-v3 int8 225 МБ (скачивается при первом голосовом) |
 | [Claude Code](https://code.claude.com/docs/en/setup) с подпиской Claude или ключом API | агент, который отвечает (другие агенты — [HARNESSES.md](HARNESSES.md)) |
 | Телефон с Telegram аккаунта-бота | войти по QR-коду |
 
@@ -36,7 +37,9 @@ cd ~/Telegram-MCP-preset
 4. Ставит автоответчик в `~/.local/share/telegram-agent/`:
    - код: `dispatcher.py`, `guard.py`, `reflow.py`, `settings.json`, `mcp.json`;
    - если их ещё нет — `prompt.md`, `config.env` (600) и `backend.env` (600).
-5. Кладёт юниты в `~/.config/systemd/user/` и выполняет `daemon-reload`.
+5. Ставит `asr-server` (локальная расшифровка голосовых, onnx-asr) в
+   `~/.local/share/asr-server/` по зафиксированному `asr/uv.lock`.
+6. Кладёт юниты в `~/.config/systemd/user/` и выполняет `daemon-reload`.
 
 Сервисы установщик не запускает и не перезапускает. Повторный запуск безопасен: код обновляется,
 прежняя версия файла сохраняется в `telegram-agent/state/*.bak-<время>`. Ваши `.env`,
@@ -89,6 +92,7 @@ uv run session_string_generator.py --qr      # QR: Telegram на телефон�
 ## 5. Запустить сервер
 
 ```bash
+systemctl --user enable --now asr-server     # расшифровка голосовых, нужна серверу ниже
 systemctl --user enable --now telegram-mcp
 journalctl --user -u telegram-mcp -n 20 --no-pager
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/mcp   # любой код кроме 000 = слушает
@@ -101,6 +105,8 @@ MCP_TRANSPORT=http  MCP_HOST=127.0.0.1  MCP_PORT=8765
 TELEGRAM_EXPOSED_TOOLS=all
 TELEGRAM_ALLOWED_ROOTS=%h/TelegramMCP  TELEGRAM_SERVER_ROOTS_ONLY=1
 TELEGRAM_EVENT_FEED=1
+TELEGRAM_TRANSCRIBE=auto  TELEGRAM_TRANSCRIBE_ENGINE=openai
+TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LANGUAGE=ru
 ```
 
 ## 6. Настроить автоответчик
@@ -190,7 +196,9 @@ sudo loginctl enable-linger "$USER"
    - В журнале появится `groups folder '…': [id]`.
    - В группе напишите «<слово из GROUP_TRIGGERS>, проверка». Ответ придёт reply через ~10 с.
 4. «Запомни: …» — бот скажет, что записал. Проверка: `cat ~/.local/share/telegram-agent/memory.md`.
-5. Большая задача, например «сколько сообщений в топике <тема> группы <группа>?». Должна пройти
+5. Голосовое боту длиннее минуты. Ответ по смыслу, в журнале `asr-server` будет строка
+   `NN.Ns audio -> NNN chars`.
+6. Большая задача, например «сколько сообщений в топике <тема> группы <группа>?». Должна пройти
    без жалоб на размер.
 
 ## Перенос на другую машину
@@ -203,7 +211,7 @@ sudo loginctl enable-linger "$USER"
      `backend.env`.
 4. Если сменились пользователь или путь, поправьте `TELEGRAM_SESSION_NAME` в `.env`. Остальные
    пути вычисляются сами.
-5. Шаги 5, 7, 9, 10, 11.
+5. Шаги 5, 7, 9, 10, 11. Модель распознавания скачается заново при первом голосовом.
 
 Можно и без переноса сессии: заново войти по шагу 4. Старую сессию затем завершите в Telegram:
 «Устройства».
@@ -211,9 +219,10 @@ sudo loginctl enable-linger "$USER"
 ## Удаление
 
 ```bash
-systemctl --user disable --now telegram-agent telegram-mcp
-rm ~/.config/systemd/user/telegram-{agent,mcp}.service && systemctl --user daemon-reload
+systemctl --user disable --now telegram-agent telegram-mcp asr-server
+rm ~/.config/systemd/user/{telegram-agent,telegram-mcp,asr-server}.service && systemctl --user daemon-reload
 rm -r ~/.local/share/telegram-agent ~/.local/share/telegram-mcp   # вместе с сессией!
+rm -r ~/.local/share/asr-server ~/.cache/huggingface/hub/models--istupakov--*
 ```
 
 После этого завершите сессию в Telegram: «Настройки → Устройства».

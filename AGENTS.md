@@ -45,7 +45,7 @@ telegram-mcp server plus the auto-responder. The human is the owner. Docs are in
 | 1 | Check prerequisites: `git`, `uv`, `python3 >= 3.10`, systemd --user. Then run `./install.sh` | — |
 | 2 | — | Edits `~/.local/share/telegram-mcp/.env`: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` |
 | 3 | Tell them the login commands (INSTALL step 4) | Runs `uv run session_string_generator.py --qr`, then `uv run telegram-mcp-migrate-session`, and edits `.env` as instructed, in their own terminal |
-| 4 | `systemctl --user enable --now telegram-mcp`, check the journal and `curl` the endpoint | — |
+| 4 | `systemctl --user enable --now asr-server telegram-mcp`, check the journals and `curl` both endpoints (`:5093/health`, `:8765/mcp`) | — |
 | 5 | Optionally register MCP for yourself (INSTALL step 8). Call `get_me` to get `SELF_ID` and `resolve_username` to get `OWNER_ID` | — |
 | 6 | Fill in `~/.local/share/telegram-agent/config.env`: all `<placeholders>` (ids, names, triggers) | Confirms the values |
 | 7 | Point them to the agent install (INSTALL step 7) | Logs in to Claude Code, or puts a token or key into `backend.env` |

@@ -71,6 +71,15 @@ class Guard(Env):
         self.check("mcp__telegram__send_message", {"chat_id": "777", "message": "x"}, allowed=False)
         self.check("mcp__telegram__get_user_status", {"user_id": "777"}, allowed=False)
 
+    def test_guest_transcribe_local_engine_only(self):
+        self.check("mcp__telegram__transcribe_voice", {"chat_id": "100", "message_id": 5})
+        self.check("mcp__telegram__transcribe_voice", {"chat_id": "100", "message_id": 5, "engine": "openai"})
+        for engine in ("groq", "telegram", "whisper"):
+            self.check("mcp__telegram__transcribe_voice", {"chat_id": "100", "message_id": 5, "engine": engine},
+                       allowed=False)
+        self.check("mcp__telegram__transcribe_voice", {"chat_id": "777", "message_id": 5}, allowed=False)
+        self.check("mcp__telegram__transcribe_voice", {"chat_id": "777", "engine": "groq"}, "owner")
+
     def test_guest_forward(self):
         self.check("mcp__telegram__forward_message", {"from_chat_id": "100", "to_chat_id": "900", "message_id": 1})
         self.check("mcp__telegram__forward_message", {"from_chat_id": "777", "to_chat_id": "900", "message_id": 1},

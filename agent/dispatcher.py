@@ -25,7 +25,7 @@ GUEST_TOOLS = [
     "get_me", "get_history", "get_messages_after", "get_message_context", "get_messages",
     "list_messages", "get_chat", "get_user_status", "send_message", "reply_to_message",
     "send_reaction", "mark_as_read", "send_typing", "forward_message", "open_photo",
-    "get_media_info", "inspect_document",
+    "get_media_info", "inspect_document", "transcribe_voice",
 ]
 
 

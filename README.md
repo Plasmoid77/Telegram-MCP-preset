@@ -26,6 +26,9 @@
   - **Секретарь:** важные чужие обращения пересылает владельцу.
   - **Память:** «запомни…» от владельца → файл `memory.md`, подмешивается в каждый запуск.
   - **Большие задачи:** прочитать весь форумный топик (сотни сообщений) и выложить сводку.
+  - **Голосовые и кружки:** расшифровывает локально, на этой же машине (GigaAM-v3 или любая
+    модель onnx-asr).
+
 - **Персона по умолчанию** — «Нейросетевой Doom bot» в манере Джарвиса из «Железного человека».
   Имя меняется в `config.env`, характер — в `prompt.md`.
 
@@ -50,14 +53,15 @@
 |---|---|
 | [`install.sh`](install.sh) | установщик для текущего пользователя: сервер из upstream (тег), автоответчик, юниты. Повторный запуск безопасен |
 | [`agent/`](agent) | автоответчик: `dispatcher.py`, `prompt.md` (шаблон с `{{KEY}}`), `guard.py`, `reflow.py`, `settings.json`, `mcp.json`, `config.env.example`, `backend.env.example` |
-| [`systemd/`](systemd) | `telegram-mcp.service` (все несекретные настройки сервера), `telegram-agent.service` |
+| [`asr/`](asr) | `asr-server`: локальная расшифровка голосовых, OpenAI-совместимый API над onnx-asr |
+| [`systemd/`](systemd) | `telegram-mcp.service` (все несекретные настройки сервера), `telegram-agent.service`, `asr-server.service` |
 | [`server/env.example`](server/env.example) | шаблон секретов сервера (`.env`) |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | **полная установка с нуля**, включая домашний сервер и перенос |
 | [`docs/USAGE.md`](docs/USAGE.md) | как пользоваться, эксплуатация, журнал, диагностика, обновление |
 | [`docs/PRESET.md`](docs/PRESET.md) | **что настроено под себя** относительно upstream и почему, модель безопасности, история исправлений |
 | [`docs/HARNESSES.md`](docs/HARNESSES.md) | другие агенты вместо Claude Code (Qwen Code, Hermes, DeepSeek, OpenCode): что есть и план |
 | [`AGENTS.md`](AGENTS.md) | инструкция для ИИ-агента, которому поручили установку |
-| [`tests/`](tests) | тесты хуков (`python3 -m unittest discover -s tests`) |
+| [`tests/`](tests) | тесты хуков и HTTP-слоя `asr-server` (`python3 -m unittest discover -s tests`) |
 
 ## Быстрый старт
 
@@ -72,7 +76,7 @@ cd Telegram-MCP-preset
    должна проходить через чат с ИИ.
 2. Заполните `~/.local/share/telegram-agent/config.env`: ваш id, id аккаунта бота, имена.
 3. Войдите в Claude Code.
-4. `systemctl --user enable --now telegram-mcp telegram-agent`.
+4. `systemctl --user enable --now asr-server telegram-mcp telegram-agent`.
 
 Поручить установку ИИ-агенту можно: дайте ему этот репозиторий и [AGENTS.md](AGENTS.md). Секреты
 и вход в Telegram человек делает сам, агент лишь говорит, где и что ввести.

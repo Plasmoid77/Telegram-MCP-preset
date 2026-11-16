@@ -132,6 +132,7 @@ systemctl --user enable --now telegram-agent
 | Клиент не видит инструменты | Сессия клиента запущена до установки — перезапустите. `curl … /mcp` возвращает `000` — сервер не работает |
 | Файловые инструменты MCP отказывают | Путь вне `~/TelegramMCP` |
 | Flood wait в журнале сервера | Telegram ограничивает частоту. Подождите или снизьте лимиты |
+| Голосовые не расшифровываются | `systemctl --user status asr-server`, `curl …:5093/health`, журнал `asr-server`. Первое голосовое после простоя ждёт загрузки модели (~17 с), первое после установки — ещё и скачивания весов. Нужен `ffmpeg` |
 
 ## Обслуживание
 
@@ -174,6 +175,9 @@ mv ~/.local/state/telegram-mcp/incoming_feed.jsonl{,.old}
 systemctl --user start telegram-agent
 ```
 
+**asr-server** обновляется вместе с пресетом (`install.sh`, версии зафиксированы в
+`asr/uv.lock`). Затем `systemctl --user restart asr-server`.
+
 **Бэкап** (хранить зашифрованно):
 
 - `~/.local/share/telegram-mcp/.env` и `telegram_mcp_session.session`;
@@ -185,16 +189,71 @@ systemctl --user start telegram-agent
 
 ## Голосовые сообщения
 
-По умолчанию бот их не расшифровывает и просит написать текстом. Расшифровку включает upstream,
-раздел [Voice transcription](https://github.com/chigwell/telegram-mcp#voice-transcription):
+Голосовые и кружки расшифровываются **локально**: звук не покидает машину и ничего не стоит.
 
-- `GROQ_API_KEY` в `.env` сервера;
-- или движок `openai` (`TELEGRAM_TRANSCRIBE_OPENAI_URL`, в том числе локальный сервер);
-- или локальный `whisper` (`uv sync --extra whisper`).
+```
+telegram-mcp (TELEGRAM_TRANSCRIBE_ENGINE=openai) ──HTTP──► asr-server 127.0.0.1:5093/v1 (onnx-asr)
+```
 
-После включения уберите из `prompt.md` фразу «Голосовые расшифровывать пока не умеешь…» и
-допишите правило: вызывать `transcribe_voice`. Для гостей добавьте `transcribe_voice` в
-`GUEST_TOOLS`. Его аргумент `chat_id` guard уже проверяет.
+- **Что такое asr-server.** Тонкая прослойка `asr/asr_server.py` над
+  [onnx-asr](https://github.com/istupakov/onnx-asr) с OpenAI-совместимым
+  `/v1/audio/transcriptions`:
+  - ffmpeg декодирует любой формат;
+  - записи длиннее 20 с режутся по паузам (Silero VAD), куски распознаются по очереди;
+  - модель загружается при первом голосовом (~17 с) и выгружается после 10 минут простоя.
+- **Модель по умолчанию:** GigaAM-v3 E2E RNN-T, int8 (225 МБ). Русский, с пунктуацией и цифрами.
+  На i7-8650U 74 с речи распознаются за ~6 с.
+- **Режим `TELEGRAM_TRANSCRIBE=auto`.** `get_history` и другие списки сами подставляют
+  расшифровки, до 5 голосовых за вызов. В остальных случаях бот вызывает `transcribe_voice` сам
+  (правило в `prompt.md`). Гостям инструмент тоже доступен, guard держит его в текущем чате.
+- **Слова-обращения.** Диспетчер ищет `GROUP_TRIGGERS` только в тексте. Голосовое в группе
+  считается обращением, если это reply на сообщение бота или в подписи есть @упоминание.
+
+**Сменить модель.** Отредактируйте `ASR_MODEL` в `~/.config/systemd/user/asr-server.service` и
+`TELEGRAM_TRANSCRIBE_OPENAI_MODEL` в `telegram-mcp.service` (он лишь для журнала), затем:
+
+```bash
+systemctl --user daemon-reload && systemctl --user restart asr-server
+```
+
+| `ASR_MODEL` | Что это |
+|---|---|
+| `gigaam-v3-e2e-rnnt` (по умолчанию), `gigaam-v3-e2e-ctc` | GigaAM-v3 с пунктуацией, русский |
+| `gigaam-v3-rnnt`, `gigaam-v3-ctc` | GigaAM-v3 без пунктуации |
+| `gigaam-multilingual-ctc`, `gigaam-multilingual-large-ctc` | GigaAM Multilingual, 70+ языков |
+| `nemo-parakeet-tdt-0.6b-v3`, `nemo-canary-1b-v2` | NVIDIA, многоязычные (включая русский) |
+| `nemo-fastconformer-ru-rnnt`, `t-tech/t-one`, `alphacep/vosk-model-ru` | другие русские модели |
+| `onnx-community/whisper-large-v3-turbo` и т. п. | Whisper |
+| `<user>/<repo>` | любая модель на HuggingFace в формате onnx-asr |
+
+Полный список — в [документации onnx-asr](https://istupakov.github.io/onnx-asr/usage/#supported-model-names).
+
+Другие переменные `asr-server`:
+
+- `ASR_QUANTIZATION` — `int8` или пусто для полной точности. На проверке GigaAM-v3 тексты
+  совпали, int8 меньше в 4 раза и быстрее;
+- `ASR_THREADS` (4), `ASR_IDLE_UNLOAD` (600 с), `ASR_PORT` (5093);
+- лимиты: `ASR_MAX_MB` (25 МБ на файл) и `ASR_MAX_SECONDS` (600 с; более длинная запись
+  обрезается). Декодирование и распознавание идут по одному запросу за раз.
+
+Гостям guard разрешает `transcribe_voice` только в текущем чате и только с локальным движком,
+поэтому платный облачный движок они не вызовут, даже если ключ к нему появится.
+
+**Подключить другой распознаватель.** Подойдёт любой OpenAI-совместимый (Speaches, облачный
+Groq, OpenAI): поменяйте `TELEGRAM_TRANSCRIBE_OPENAI_URL`/`_MODEL` (ключ —
+`TELEGRAM_TRANSCRIBE_OPENAI_API_KEY` в `.env`), остальное как в разделе upstream
+[Voice transcription](https://github.com/chigwell/telegram-mcp#voice-transcription).
+
+**Проверка и журнал:**
+
+```bash
+curl -s http://127.0.0.1:5093/health                      # "loaded": модель в памяти или нет
+curl -s -F file=@voice.ogg http://127.0.0.1:5093/v1/audio/transcriptions
+journalctl --user -u asr-server -f                        # "74.0s audio -> 525 chars in 5.8s"
+```
+
+Расшифровки кэшируются сервером telegram-mcp (SQLite, 600). Повторно одно и то же голосовое не
+распознаётся.
 
 ## Стоимость
 

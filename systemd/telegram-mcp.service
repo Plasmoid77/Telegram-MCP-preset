@@ -17,6 +17,12 @@ Environment=TELEGRAM_ALLOWED_ROOTS=%h/TelegramMCP
 Environment=TELEGRAM_SERVER_ROOTS_ONLY=1
 # Append settled incoming bursts to ~/.local/state/telegram-mcp/incoming_feed.jsonl
 Environment=TELEGRAM_EVENT_FEED=1
+# Voice messages -> local asr-server (OpenAI-compatible); listings prefetch up to 5 voices per call
+Environment=TELEGRAM_TRANSCRIBE=auto
+Environment=TELEGRAM_TRANSCRIBE_ENGINE=openai
+Environment=TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1
+Environment=TELEGRAM_TRANSCRIBE_OPENAI_MODEL=gigaam-v3-e2e-rnnt
+Environment=TELEGRAM_TRANSCRIBE_LANGUAGE=ru
 ExecStart=%h/.local/share/telegram-mcp/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=30

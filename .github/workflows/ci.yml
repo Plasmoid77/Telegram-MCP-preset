@@ -13,7 +13,7 @@ jobs:
       - name: shellcheck
         run: shellcheck install.sh
       - name: compile
-        run: python -m py_compile agent/*.py tests/*.py
+        run: python -m py_compile agent/*.py asr/*.py tests/*.py
       - name: hook tests
         run: python -m unittest discover -s tests -v
       - name: no personal data or secrets

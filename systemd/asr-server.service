@@ -1,0 +1,23 @@
+[Unit]
+Description=Local speech-to-text (onnx-asr, OpenAI-compatible, 127.0.0.1:5093) for telegram-mcp voice messages
+Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset/blob/main/docs/USAGE.md#голосовые-сообщения
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/asr-server
+# Any onnx-asr model name or Hugging Face repo; weights download on first use to ~/.cache/huggingface
+Environment=ASR_MODEL=gigaam-v3-e2e-rnnt
+# int8 (default, 225 MB for GigaAM-v3) or empty for full precision
+Environment=ASR_QUANTIZATION=int8
+Environment=ASR_PORT=5093
+Environment=ASR_THREADS=4
+# Unload the model after this many idle seconds (RAM back to ~50 MB)
+Environment=ASR_IDLE_UNLOAD=600
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+ExecStart=%h/.local/share/asr-server/.venv/bin/python -I %h/.local/share/asr-server/asr_server.py
+Restart=on-failure
+RestartSec=30
+Nice=5
+
+[Install]
+WantedBy=default.target

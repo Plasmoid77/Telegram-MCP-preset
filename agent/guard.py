@@ -56,6 +56,8 @@ def deny(msg):
 
 if tool == "get_me":
     sys.exit(0)
+if tool == "transcribe_voice" and args.get("engine") not in (None, "", "openai"):
+    deny("only the local transcription engine is allowed (omit engine).")
 if tool in ("send_message", "reply_to_message"):
     if norm(args.get("chat_id")) not in {norm(cur)} | {norm(n) for n in notify}:
         deny("you may only write to the current chat or notify the owner.")

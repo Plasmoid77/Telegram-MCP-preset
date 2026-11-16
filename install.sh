@@ -3,7 +3,8 @@
 #
 # 1. telegram-mcp from the upstream repo (https://github.com/chigwell/telegram-mcp), pinned tag
 # 2. the telegram-agent auto-responder from this repo
-# 3. both systemd --user units
+# 3. asr-server: local speech-to-text for voice messages (onnx-asr, default GigaAM-v3)
+# 4. the systemd --user units
 #
 # Safe to re-run. It never touches secrets (.env, *.session, backend.env), config.env,
 # prompt.md or memory.md once they exist, and it never starts, stops or restarts services.
@@ -15,6 +16,7 @@ REF=${TELEGRAM_MCP_REF:-v3.3.22}          # the tag this preset was verified wit
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MCP_DIR=$HOME/.local/share/telegram-mcp
 AGENT_DIR=$HOME/.local/share/telegram-agent
+ASR_DIR=$HOME/.local/share/asr-server
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 FILES_DIR=$HOME/TelegramMCP
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -75,9 +77,17 @@ keep "$SRC/agent/prompt.md" "$AGENT_DIR/prompt.md" 644
 keep "$SRC/agent/config.env.example" "$AGENT_DIR/config.env" 600
 keep "$SRC/agent/backend.env.example" "$AGENT_DIR/backend.env" 600
 
-# --- 3. systemd --user units ------------------------------------------------------------------
+# --- 3. asr-server (voice messages) ---------------------------------------------------------
+mkdir -p "$ASR_DIR"
+for f in asr_server.py pyproject.toml uv.lock; do
+    put "$SRC/asr/$f" "$ASR_DIR/$f" 644
+done
+(cd "$ASR_DIR" && uv sync --quiet --frozen)
+command -v ffmpeg >/dev/null 2>&1 || say "ffmpeg not found: install it, asr-server needs it to decode voice messages"
+
+# --- 4. systemd --user units ------------------------------------------------------------------
 mkdir -p "$UNIT_DIR"
-for u in telegram-mcp.service telegram-agent.service; do
+for u in telegram-mcp.service telegram-agent.service asr-server.service; do
     put "$SRC/systemd/$u" "$UNIT_DIR/$u" 644
 done
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
@@ -92,6 +102,6 @@ cat <<EOF
 ==> Next (docs/INSTALL.md):
     - secrets in $MCP_DIR/.env and Telegram login (step 4), in your own terminal
     - $AGENT_DIR/config.env (step 6)
-    - systemctl --user enable --now telegram-mcp telegram-agent
+    - systemctl --user enable --now asr-server telegram-mcp telegram-agent
     - loginctl enable-linger \$USER   (keep running without a login session)
 EOF
