@@ -1,25 +1,40 @@
 """Telegram auto-responder: runs one headless Claude Code turn (`claude -p`)
 per settled burst of messages addressed to the account.
 
-Private chats: tails telegram-mcp's incoming feed (every message is addressed).
-Allowed groups (the GROUPS_FOLDER Telegram folder plus GROUPS): long-polls the MCP's
-wait_for_events and runs only for messages that reply to/mention the account or name
-it (GROUP_TRIGGERS).
+Private chats: every incoming message is addressed. Allowed groups (the GROUPS_FOLDER
+Telegram folder plus GROUPS): only messages that reply to/mention the account or name it
+(GROUP_TRIGGERS).
+
+Chat history is the source of truth. Each chat has a cursor (state/cursors.json): every
+message up to it has been looked at once. The live stream (telegram-mcp's incoming feed and
+wait_for_events) only says which chat to read now; a periodic pass reads the recent chats
+anyway, so a message the stream lost (network drop, reconnect, server restart) is still
+answered, and nothing is answered twice.
 
 Part of Telegram-MCP-preset: https://github.com/Plasmoid77/Telegram-MCP-preset
 
-Runs are serial (one Telegram session, predictable cost). Feed lines for the
-same chat that queue up while a run is busy are merged into one run.
+Runs are serial (one Telegram session, predictable cost). Messages of one chat that
+arrive while a run is busy are answered together in the next run.
 """
 import collections, json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request
+from datetime import datetime
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 FEED = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "telegram-mcp/incoming_feed.jsonl"
 STATE = BASE / "state/offset.json"
+CURSORS = BASE / "state/cursors.json"
 MCP_URL = json.loads((BASE / "mcp.json").read_text())["mcpServers"]["telegram"]["url"]
+SETTLE = 6            # s of silence in a private chat before its burst is handled
 GROUP_SETTLE = 5      # s of silence in a group before its burst is handled
-GROUP_MAX_WAIT = 30   # s after the first message: handle even if the group keeps talking
+MAX_WAIT = 30         # s after the first message: handle even if the chat keeps talking
+PAGE, MAX_PAGES = 100, 5  # history read per chat and pass (the rest is read on the next pass)
+NEW_CHAT_PAGE = 100   # a chat without a cursor: its newest messages (the tool maximum)
+MISS_GRACE = 60       # s: a message older than this that only the periodic pass found was missed
+STALL_WINDOW = 900    # s: misses in two passes with no live event in between = stalled stream
+RESTART_COOLDOWN = 1800  # s between automatic restarts of telegram-mcp
+RETRY = 30            # s before a chat whose read failed is read again
+SERVICE_CHATS = {777000, 42777}  # Telegram notifications (login codes): never answered
 
 GUEST_TOOLS = [
     "get_me", "get_history", "get_messages_after", "get_message_context", "get_messages",
@@ -33,7 +48,8 @@ def log(*a):
     print(time.strftime("%F %T"), *a, flush=True)
 
 
-DEFAULTS = {"FILES_DIR": "~/TelegramMCP"}
+DEFAULTS = {"FILES_DIR": "~/TelegramMCP", "RECONCILE_INTERVAL": "180", "RECONCILE_CHATS": "15",
+            "RESTART_STALLED_MCP": "1"}
 
 
 def load_config():
@@ -77,26 +93,15 @@ def read_new_lines(state):
     return lines, st.st_ino, offset + end
 
 
-def merge(lines, cfg):
-    bursts = collections.OrderedDict()
+def feed_chats(lines):
+    """Chat ids named by new feed lines (a hint only: history decides what is new)."""
+    out = []
     for raw in lines:
         try:
-            ev = json.loads(raw)
-            cid = int(ev["chat_id"])
+            out.append(int(json.loads(raw)["chat_id"]))
         except (ValueError, KeyError, TypeError):
             log("skip malformed feed line")
-            continue
-        if time.time() - float(ev.get("ts", time.time())) > int(cfg["MAX_AGE"]):
-            log(f"skip stale burst chat={cid}")
-            continue
-        if cid in bursts:
-            b = bursts[cid]
-            b["first_message_id"] = min(b["first_message_id"], ev["first_message_id"])
-            b["last_message_id"] = max(b["last_message_id"], ev["last_message_id"])
-            b["message_count"] += ev.get("message_count", 1)
-        else:
-            bursts[cid] = ev
-    return bursts
+    return out
 
 
 class RateLimit:
@@ -176,53 +181,68 @@ class Mcp:
             raise RuntimeError(f"{name}: {text[:300]}")
 
 
-class Groups:
-    """Follows the allowed groups through wait_for_events and yields addressed bursts."""
+class Cursors:
+    """Per-chat history cursors, saved in state/cursors.json.
 
-    def __init__(self, mcp):
-        self.mcp, self.boot, self.seq = mcp, None, None
-        self.pending = {}  # chat_id -> {"ids": set, "first": t, "last": t}
+    `chats`: chat id -> id of the newest message already looked at. `since`: when the
+    responder first ran; a chat seen for the first time is only answered for messages after
+    it. `bots`: user ids known to be bots. The file is saved before the agent runs, so a crash
+    mid-run does not answer twice (at most once).
+    """
 
-    def poll(self, groups, timeout):
-        if self.seq is None:  # start from now, do not replay the server's log
-            r = self.mcp.call("wait_for_events", {"after_seq": -1})
-            self.boot, self.seq = r["boot"], r["last_seq"]
-            return
-        r = self.mcp.call("wait_for_events", {"after_seq": self.seq, "boot": self.boot,
-                                              "timeout": timeout}, timeout=timeout + 30)
-        if r.get("reset"):
-            log("group events: server restarted, continuing from now")
-        now = time.monotonic()
-        for ev in r.get("events", []):
-            cid = ev.get("chat_id")
-            if (cid not in groups or ev.get("chat_type") not in ("group", "supergroup")
-                    or ev.get("out") or ev.get("sender_bot") or ev.get("service")):
-                continue
-            p = self.pending.setdefault(cid, {"ids": set(), "first": now, "last": now})
-            p["ids"].add(int(ev["message_id"]))
-            p["last"] = now
-        self.boot, self.seq = r["boot"], r["last_seq"]
+    def __init__(self, path):
+        self.path = path
+        try:
+            d = json.loads(path.read_text())
+        except (OSError, ValueError):
+            d = {}
+        self.chats = {int(k): int(v) for k, v in d.get("chats", {}).items()}
+        self.bots = {int(x) for x in d.get("bots", [])}
+        self.since = float(d.get("since") or time.time())
+        self.last_restart = float(d.get("last_restart") or 0)
+        if not d:
+            self.save()
 
-    def wait_hint(self):
-        """Seconds until the next pending group burst settles (None if none pending)."""
-        if not self.pending:
-            return None
-        now = time.monotonic()
-        return max(0.0, min(min(p["last"] + GROUP_SETTLE, p["first"] + GROUP_MAX_WAIT) - now
-                            for p in self.pending.values()))
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"since": self.since, "last_restart": self.last_restart,
+                                   "bots": sorted(self.bots),
+                                   "chats": {str(k): v for k, v in sorted(self.chats.items())}}))
+        tmp.replace(self.path)
 
-    def settled(self):
-        now = time.monotonic()
-        for cid in [c for c, p in self.pending.items()
-                    if now - p["last"] >= GROUP_SETTLE or now - p["first"] >= GROUP_MAX_WAIT]:
-            yield cid, self.pending.pop(cid)["ids"]
 
-    def addressed(self, cid, ids, triggers):
-        """Messages among `ids` that address the account: reply/mention or a trigger word."""
-        r = self.mcp.call("get_messages_after", {"chat_id": cid, "after_id": max(0, min(ids) - 1), "limit": 100})
-        return [m for m in r.get("messages", [])
-                if m.get("id") in ids and not m.get("out")
-                and (m.get("addressed") or (triggers and triggers.search(m.get("text") or "")))]
+def msg_time(m):
+    """Unix time of a get_messages_after record (now if the date is missing or odd)."""
+    try:
+        return datetime.fromisoformat(str(m.get("date")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
+
+
+def read_after(mcp, cid, cursor):
+    """New messages of a chat, oldest first: (messages, chat_type, new_cursor, complete).
+
+    With a cursor: everything after it, at most MAX_PAGES pages (complete=False: more remain).
+    Without one: the newest NEW_CHAT_PAGE messages.
+    """
+    if cursor is None:
+        r = mcp.call("get_messages_after", {"chat_id": cid, "limit": NEW_CHAT_PAGE})
+        msgs = r.get("messages", [])
+        if r.get("has_more") and msgs and not any(m.get("out") for m in msgs):
+            log(f"chat={cid} first look: only the newest {len(msgs)} messages are read")
+        return msgs, r.get("chat_type"), max([0] + [int(m["id"]) for m in msgs]), True
+    msgs, after, ctype = [], cursor, None
+    for _ in range(MAX_PAGES):
+        r = mcp.call("get_messages_after", {"chat_id": cid, "after_id": after, "limit": PAGE})
+        ctype = r.get("chat_type") or ctype
+        batch = r.get("messages", [])
+        msgs += batch
+        nxt = max([after, int(r.get("next_after_id") or 0)] + [int(m["id"]) for m in batch])
+        if not r.get("has_more") or nxt == after:
+            return msgs, ctype, nxt, True
+        after = nxt
+    return msgs, ctype, after, False
 
 
 GROUP_TYPES = ("Group", "Group (Basic)", "Supergroup")
@@ -366,66 +386,255 @@ def group_task(cid, msgs, tier, cfg):
     )
 
 
-def handle_group(groups_st, cid, ids, cfg, rl):
-    msgs = groups_st.addressed(cid, ids, trigger_regex(cfg))
-    if not msgs:
-        return
-    owner = cfg.get("OWNER_ID", "")
-    by_tier = {"owner": [m for m in msgs if owner and str(m.get("sender_id")) == owner],
-               "guest": [m for m in msgs if not (owner and str(m.get("sender_id")) == owner)]}
-    for tier in ("owner", "guest"):
-        if not by_tier[tier]:
-            continue
-        if not rl.allow(cid, cfg):
-            log(f"rate limit: skip group={cid}")
+class Dispatcher:
+    """One loop: live hints -> due chats -> read history after the cursor -> run the agent."""
+
+    def __init__(self, mcp, cursors):
+        self.mcp, self.cur, self.rl = mcp, cursors, RateLimit()
+        self.cfg, self.groups = {}, set()
+        self.due = {}         # chat id -> [monotonic time it is due, source: feed|events|scan]
+        self.pending = {}     # chat id -> {"first", "last", "group"}: live burst still settling
+        self.deferred = set()  # chats a periodic pass already postponed once (still settling)
+        self.humans = set()   # user ids known not to be bots (bots are in cursors.bots)
+        self.boot = self.seq = None
+        self.next_scan = 0.0  # first pass right away: catches what came while we were down
+        self.last_live = 0.0  # monotonic time of the last incoming live event
+        self.misses = []      # monotonic times of periodic passes that found missed messages
+        self.miss_pass = False
+
+    # --- hints ----------------------------------------------------------------------------
+    def hint(self, cid, when, source):
+        cur = self.due.get(cid)
+        if cur is None or when < cur[0]:
+            self.due[cid] = [when, source]
+        elif source != "scan":
+            cur[1] = source  # the live stream did deliver it: not a miss
+
+    def on_feed(self, lines):
+        for cid in feed_chats(lines):
+            self.last_live = time.monotonic()
+            if str(cid) != self.cfg.get("SELF_ID"):
+                self.hint(cid, time.monotonic(), "feed")
+
+    def poll_events(self, timeout):
+        if self.seq is None:  # start from now: history covers what came before
+            r = self.mcp.call("wait_for_events", {"after_seq": -1})
+            self.boot, self.seq = r["boot"], r["last_seq"]
             return
-        run_agent(cid, group_task(cid, by_tier[tier], tier, cfg), tier, cfg)
+        r = self.mcp.call("wait_for_events", {"after_seq": self.seq, "boot": self.boot,
+                                              "timeout": timeout}, timeout=timeout + 30)
+        if r.get("reset") or r.get("gap"):
+            log("live events: " + ("server restarted" if r.get("reset") else "gap") + ", reading history")
+            self.next_scan = 0.0
+        now = time.monotonic()
+        for ev in r.get("events", []):
+            cid = ev.get("chat_id")
+            if ev.get("out") or ev.get("service"):
+                continue
+            self.last_live = now
+            ctype = ev.get("chat_type")
+            if ev.get("sender_bot"):
+                if ctype == "private" and isinstance(cid, int):
+                    self.cur.bots.add(cid)
+                continue
+            if not isinstance(cid, int) or str(cid) == self.cfg.get("SELF_ID"):
+                continue
+            if ctype == "private" or (ctype in ("group", "supergroup") and cid in self.groups):
+                p = self.pending.setdefault(cid, {"first": now, "last": now, "group": ctype != "private"})
+                p["last"] = now
+        self.boot, self.seq = r["boot"], r["last_seq"]
 
+    def settle_pending(self):
+        now = time.monotonic()
+        for cid, p in list(self.pending.items()):
+            quiet = GROUP_SETTLE if p["group"] else SETTLE
+            if now - p["last"] >= quiet or now - p["first"] >= MAX_WAIT:
+                del self.pending[cid]
+                self.hint(cid, now, "events")
 
-def main():
-    rl = RateLimit()
-    groups_st = Groups(Mcp(MCP_URL))
-    log(f"telegram-agent started, feed={FEED}")
-    if load_state() is None and not FEED.exists():
-        save_state(None, 0)  # feed not created yet: read it from the start once it appears
-    while True:
-        cfg = load_config()
-        lines = []
-        if FEED.exists():
-            state = load_state()
-            lines, inode, offset = read_new_lines(state)
-            bursts = merge(lines, cfg)
-            save_state(inode, offset)  # at-most-once: a crash mid-run won't re-answer
-            owner = cfg.get("OWNER_ID", "")
-            for cid, ev in bursts.items():
-                if str(cid) == cfg.get("SELF_ID"):
-                    continue
-                if not rl.allow(cid, cfg):
-                    log(f"rate limit: skip chat={cid}")
-                    continue
-                tier = "owner" if owner and str(cid) == owner else "guest"
-                run_agent(cid, private_task(ev, tier, cfg), tier, cfg)
+    def periodic(self):
+        """Mark the recent private chats and every allowed group as due (source "scan")."""
+        text = self.mcp.call("list_chats", {"limit": int(self.cfg["RECONCILE_CHATS"])}, raw=True)
+        recs = json.loads(text).get("results", []) if text.lstrip().startswith("{") else []
+        chats = {c["chat_id"] for c in recs if c.get("type") == "User" and isinstance(c.get("chat_id"), int)}
+        chats = (chats - self.cur.bots - SERVICE_CHATS - {int(self.cfg.get("SELF_ID") or 0)}) | self.groups
+        now = time.monotonic()
+        self.miss_pass = False
+        for cid in chats:
+            self.hint(cid, now, "scan")
 
+    # --- one chat ---------------------------------------------------------------------------
+    def is_bot(self, uid):
+        if uid in self.cur.bots:
+            return True
+        if uid in self.humans:
+            return False
+        try:
+            bot = bool(self.mcp.call("get_chat", {"chat_id": uid}).get("bot"))
+        except Exception:
+            bot = False  # unknown: treat as a person (the agent still sees who wrote)
+        (self.cur.bots if bot else self.humans).add(uid)
+        return bot
+
+    def process(self, cid, source):
+        if source == "scan" and cid in self.pending:
+            source = "events"  # the live stream has it, the burst is still settling
+        cursor = self.cur.chats.get(cid)
+        msgs, ctype, new_cursor, complete = read_after(self.mcp, cid, cursor)
+        private = ctype == "private"
+        if not private and cid not in self.groups:
+            return  # a group that is not (or no longer) allowed, or a channel
+        if cursor is None and not private:  # a group just allowed: start from now
+            self.commit(cid, new_cursor)
+            return
+        now = time.time()
+        incoming = [m for m in msgs if not m.get("out") and not m.get("action")]
+        if (source == "scan" and incoming and now - msg_time(incoming[-1]) < SETTLE
+                and cid not in self.deferred):
+            self.deferred.add(cid)  # someone is typing right now: let the burst settle
+            self.hint(cid, time.monotonic() + SETTLE, "scan")
+            return
+        self.deferred.discard(cid)
+        new = incoming
+        if cursor is None:  # first look at this chat: only what came after the last reply
+            last_out = max([int(m["id"]) for m in msgs if m.get("out")], default=0)
+            new = [m for m in new if int(m["id"]) > last_out and msg_time(m) >= self.cur.since]
+        max_age = int(self.cfg["MAX_AGE"])
+        stale = [m for m in new if now - msg_time(m) > max_age]
+        if stale:
+            log(f"chat={cid} skip {len(stale)} message(s) older than MAX_AGE")
+            new = [m for m in new if now - msg_time(m) <= max_age]
+        if private:
+            if str(cid) == self.cfg.get("SELF_ID") or cid in SERVICE_CHATS or (new and self.is_bot(cid)):
+                new = []
+        else:
+            triggers = trigger_regex(self.cfg)
+            new = [m for m in new if (m.get("addressed") or (triggers and triggers.search(m.get("text") or "")))
+                   and not (m.get("sender_id") and self.is_bot(m["sender_id"]))]
+        self.commit(cid, new_cursor)  # before the run: at most once
+        if not complete:
+            self.hint(cid, time.monotonic(), source)  # read the rest on the next pass
+        if not new:
+            return
+        if source == "scan":
+            age = now - msg_time(new[-1])
+            log(f"chat={cid} {len(new)} message(s) found by the periodic pass, {age:.0f}s old")
+            if age > MISS_GRACE and not self.miss_pass:
+                self.miss_pass = True
+                self.misses.append(time.monotonic())
+        if private:
+            self.run_private(cid, new)
+        else:
+            self.run_group(cid, new)
+
+    def commit(self, cid, cursor):
+        """Advance a chat's cursor; on a failed save keep the old one (nothing is skipped)."""
+        old = self.cur.chats.get(cid)
+        self.cur.chats[cid] = cursor
+        try:
+            self.cur.save()
+        except Exception:
+            if old is None:
+                self.cur.chats.pop(cid, None)
+            else:
+                self.cur.chats[cid] = old
+            raise
+
+    def run_private(self, cid, msgs):
+        if not self.rl.allow(cid, self.cfg):
+            log(f"rate limit: skip chat={cid}")
+            return
+        owner = self.cfg.get("OWNER_ID", "")
+        tier = "owner" if owner and str(cid) == owner else "guest"
+        ev = {"chat_id": cid, "name": msgs[0].get("sender"), "username": msgs[0].get("username"),
+              "first_message_id": msgs[0]["id"], "last_message_id": msgs[-1]["id"], "message_count": len(msgs)}
+        run_agent(cid, private_task(ev, tier, self.cfg), tier, self.cfg)
+
+    def run_group(self, cid, msgs):
+        owner = self.cfg.get("OWNER_ID", "")
+        by_tier = {"owner": [m for m in msgs if owner and str(m.get("sender_id")) == owner],
+                   "guest": [m for m in msgs if not (owner and str(m.get("sender_id")) == owner)]}
+        for tier in ("owner", "guest"):
+            if not by_tier[tier]:
+                continue
+            if not self.rl.allow(cid, self.cfg):
+                log(f"rate limit: skip group={cid}")
+                return
+            run_agent(cid, group_task(cid, by_tier[tier], tier, self.cfg), tier, self.cfg)
+
+    # --- stalled stream -------------------------------------------------------------------
+    def check_stall(self):
+        """Misses in two periodic passes and no live event since the first one: the server's
+        update stream is stuck (seen after network drops). Restart it, at most every 30 min."""
+        now = time.monotonic()
+        self.misses = [t for t in self.misses if now - t < STALL_WINDOW and t > self.last_live]
+        if (len(self.misses) < 2 or self.cfg.get("RESTART_STALLED_MCP") != "1"
+                or time.time() - self.cur.last_restart < RESTART_COOLDOWN):
+            return
+        log("live updates look stalled (missed messages, no live events): restarting telegram-mcp")
+        self.cur.last_restart = time.time()
+        self.cur.save()
+        self.misses = []
+        subprocess.run(["systemctl", "--user", "--no-block", "restart", "telegram-mcp.service"],
+                       capture_output=True, timeout=30)
+
+    # --- loop -------------------------------------------------------------------------------
+    def step(self):
+        self.cfg = load_config()
         groups = set()
-        for g in cfg_list(cfg, "GROUPS"):
+        for g in cfg_list(self.cfg, "GROUPS"):
             try:
                 groups.add(int(g))
             except ValueError:
                 log(f"bad GROUPS entry {g!r} (use the numeric chat id)")
-        groups |= folder_groups(groups_st.mcp, cfg.get("GROUPS_FOLDER", ""))
-        if not groups:
-            groups_st.seq, groups_st.pending = None, {}
-            if not lines:
-                time.sleep(2)
-            continue
+        self.groups = groups | folder_groups(self.mcp, self.cfg.get("GROUPS_FOLDER", ""))
+
+        lines = []
+        if FEED.exists():
+            lines, inode, offset = read_new_lines(load_state())
+            save_state(inode, offset)
+            self.on_feed(lines)
+
+        now = time.monotonic()
+        if now >= self.next_scan:
+            try:
+                self.periodic()
+                self.next_scan = now + int(self.cfg["RECONCILE_INTERVAL"])
+            except Exception as e:
+                log(f"periodic pass error: {e}")
+                self.next_scan = now + RETRY
+
+        for cid, (when, source) in sorted(self.due.items(), key=lambda x: x[1][0]):
+            if when > time.monotonic():
+                continue
+            del self.due[cid]
+            try:
+                self.process(cid, source)
+            except Exception as e:  # MCP down or a tool error: try this chat again later
+                log(f"chat={cid} read error: {e}")
+                self.hint(cid, time.monotonic() + RETRY, source)
+                self.next_scan = min(self.next_scan, time.monotonic() + RETRY)
+        self.check_stall()
+
+        waits = [w for w, _ in self.due.values()] + [self.next_scan]
+        waits += [p["last"] + (GROUP_SETTLE if p["group"] else SETTLE) for p in self.pending.values()]
+        timeout = 0 if lines else max(0, min(2, min(waits) - time.monotonic()))
         try:
-            hint = groups_st.wait_hint()
-            groups_st.poll(groups, 0 if lines else (2 if hint is None else min(2, hint)))
-            for cid, ids in list(groups_st.settled()):
-                handle_group(groups_st, cid, ids, cfg, rl)
-        except Exception as e:  # MCP down or a tool error: keep the private feed alive
-            log(f"group poll error: {e}")
+            self.poll_events(round(timeout, 1))
+            self.settle_pending()
+        except Exception as e:  # MCP down: history catches up once it is back
+            log(f"live events error: {e}")
+            self.next_scan = min(self.next_scan, time.monotonic() + RETRY)
             time.sleep(5)
+
+
+def main():
+    log(f"telegram-agent started, feed={FEED}")
+    if load_state() is None and not FEED.exists():
+        save_state(None, 0)  # feed not created yet: read it from the start once it appears
+    d = Dispatcher(Mcp(MCP_URL), Cursors(CURSORS))
+    while True:
+        d.step()
 
 
 if __name__ == "__main__":
