@@ -111,4 +111,4 @@ telegram-mcp — отдельный проект под Apache-2.0. Его ко�
 - [ ] Открытые агенты (Qwen Code, Hermes, DeepSeek) через MCP-шлюз `tg-gate` — когда появится
   ключ API открытой модели ([docs/HARNESSES.md](docs/HARNESSES.md)).
 - [ ] Перенос на домашний сервер: работа без входа в систему (`loginctl enable-linger`), часовой пояс.
-- [ ] Своё приложение на my.telegram.org вместо общего `api_id`.
+- [ ] Своё приложение на my.telegram.org (собственный `api_id`).
