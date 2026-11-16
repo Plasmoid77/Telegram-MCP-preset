@@ -17,6 +17,9 @@ Environment=TELEGRAM_ALLOWED_ROOTS=%h/TelegramMCP
 Environment=TELEGRAM_SERVER_ROOTS_ONLY=1
 # Append settled incoming bursts to ~/.local/state/telegram-mcp/incoming_feed.jsonl
 Environment=TELEGRAM_EVENT_FEED=1
+# Ask Telegram for updates missed during network drops every 120 s (empty answer if none);
+# the server also catches up right after each reconnect (telegram-mcp >= v3.3.23)
+Environment=TELEGRAM_CATCH_UP_INTERVAL=120
 # Voice messages -> local asr-server (OpenAI-compatible); listings prefetch up to 5 voices per call
 Environment=TELEGRAM_TRANSCRIBE=auto
 Environment=TELEGRAM_TRANSCRIBE_ENGINE=openai

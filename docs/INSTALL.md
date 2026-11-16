@@ -29,7 +29,7 @@ cd ~/Telegram-MCP-preset
 `install.sh` делает следующее:
 
 1. Клонирует `https://github.com/chigwell/telegram-mcp` в `~/.local/share/telegram-mcp`, ставит
-   тег `v3.3.22` (другой: `TELEGRAM_MCP_REF=vX.Y.Z ./install.sh`) и выполняет `uv sync`.
+   тег `v3.3.23` (другой: `TELEGRAM_MCP_REF=vX.Y.Z ./install.sh`) и выполняет `uv sync`.
    **Только из git:** пакет `telegram-mcp` на PyPI — чужой проект с тем же именем.
 2. Создаёт `~/.local/share/telegram-mcp/.env` (600) из `server/env.example`.
 3. Создаёт папку `~/TelegramMCP` (700). Это единственная папка, с которой работают файловые
