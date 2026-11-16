@@ -516,9 +516,9 @@ class Dispatcher:
             self.hint(cid, time.monotonic(), source)  # read the rest on the next pass
         if not new:
             return
+        age = now - msg_time(new[0])
+        log(f"chat={cid} new: id {new[0]['id']}..{new[-1]['id']} ({len(new)}) via {source}, oldest {age:.0f}s")
         if source == "scan":
-            age = now - msg_time(new[-1])
-            log(f"chat={cid} {len(new)} message(s) found by the periodic pass, {age:.0f}s old")
             if age > MISS_GRACE and not self.miss_pass:
                 self.miss_pass = True
                 self.misses.append(time.monotonic())

@@ -132,7 +132,7 @@ systemctl --user enable --now telegram-agent
 | `groups folder read error (keeping [...])` | папку прочитать не удалось, работает прежний список |
 | `live events error: ...`, `chat=<id> read error: ...`, `periodic pass error: ...` | MCP или Telegram недоступен. Повтор через 30 с, потом страховочный проход |
 | `live events: server restarted\|gap, reading history` | перезапускался сервер или переполнился его буфер: внеочередной проход по истории |
-| `chat=<id> N message(s) found by the periodic pass, Ss old` | сообщение нашла страховка. Больше минуты — живой поток его потерял |
+| `chat=<id> new: id A..B (N) via feed\|events\|scan, oldest Ss` | взяты новые сообщения; `scan` — их нашла страховка, и если им больше минуты, живой поток их потерял |
 | `live updates look stalled ...: restarting telegram-mcp` | поток сервера завис, сервер перезапущен автоматически |
 | `rate limit: skip ...` | сработал лимит |
 | `chat=<id> skip N message(s) older than MAX_AGE` | сообщения старше `MAX_AGE` не отвечены |
@@ -148,7 +148,7 @@ systemctl --user enable --now telegram-agent
 | «Не могу прочитать всё», «файл одной строкой» | Нужен запуск `tier=owner` (у гостей Read нет) и PostToolUse-хук в `settings.json`. После обновления Claude Code проверьте, что уведомление по-прежнему содержит `saved to /…txt` (регулярка в `reflow.py`) |
 | Не запомнил | `cat memory.md`. Просьба должна быть от владельца. «Blocked by guard» на Edit — бот пытался писать не в тот путь |
 | Сказал «готово», ничего не сделано | Проверьте реальное состояние. Промпт это запрещает; при повторе уточните формулировку в `prompt.md` |
-| Бот ответил через несколько минут после обрыва сети | Нормально: сообщение нашла страховка (строка `found by the periodic pass`). Если таких строк много при живой сети — проверьте `journalctl --user -u telegram-mcp` на переподключения |
+| Бот ответил через несколько минут после обрыва сети | Нормально: сообщение нашла страховка (строка `via scan`). Если таких строк много при живой сети — проверьте `journalctl --user -u telegram-mcp` на переподключения |
 | В ленте пусто | Лента стартует с первого входящего личного сообщения после запуска сервера. Проверьте `incoming_feed_status` и не вызывал ли кто-то `disable_incoming_feed` |
 | `not authorized` | Сессию завершили в «Устройствах» или сменили пароль. Войдите заново ([INSTALL.md](INSTALL.md#4-войти-в-telegram-в-своём-терминале-не-через-ии)) |
 | `AuthKeyDuplicatedError` | Где-то работает второй экземпляр с этой сессией |
