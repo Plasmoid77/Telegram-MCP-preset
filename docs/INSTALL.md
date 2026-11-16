@@ -11,7 +11,7 @@
 | Ваш основной аккаунт | владелец: с него вы даёте боту поручения |
 | `api_id` / `api_hash` | приложение на [my.telegram.org](https://my.telegram.org/apps): Platform — Desktop, short name без дефиса. Можно создать на любом своём аккаунте |
 | Linux с systemd, Python ≥ 3.10, `git`, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), `ffmpeg` | сервер, диспетчер, расшифровка голосовых |
-| ~1 ГБ на диске сверх telegram-mcp | `asr-server`: окружение 160 МБ + модель GigaAM-v3 int8 225 МБ (скачивается при первом голосовом) |
+| ~1.5 ГБ на диске сверх telegram-mcp | `asr-server`: окружение 160 МБ + модель GigaAM-v3 885 МБ (скачивается при первом голосовом; `int8` — 225 МБ) |
 | [Claude Code](https://code.claude.com/docs/en/setup) с подпиской Claude или ключом API | агент, который отвечает (другие агенты — [HARNESSES.md](HARNESSES.md)) |
 | Телефон с Telegram аккаунта-бота | войти по QR-коду |
 

@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOST = os.environ.get("ASR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ASR_PORT", "5093"))
 MODEL = os.environ.get("ASR_MODEL", "gigaam-v3-e2e-rnnt")
-QUANT = os.environ.get("ASR_QUANTIZATION", "int8") or None   # "" = full precision
+QUANT = os.environ.get("ASR_QUANTIZATION", "") or None   # "" = full precision, or "int8"
 THREADS = int(os.environ.get("ASR_THREADS", "4"))
 IDLE_UNLOAD = int(os.environ.get("ASR_IDLE_UNLOAD", "600"))
 MAX_BYTES = int(float(os.environ.get("ASR_MAX_MB", "25")) * 1048576)

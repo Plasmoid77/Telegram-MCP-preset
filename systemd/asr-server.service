@@ -7,8 +7,8 @@ Type=simple
 WorkingDirectory=%h/.local/share/asr-server
 # Any onnx-asr model name or Hugging Face repo; weights download on first use to ~/.cache/huggingface
 Environment=ASR_MODEL=gigaam-v3-e2e-rnnt
-# int8 (default, 225 MB for GigaAM-v3) or empty for full precision
-Environment=ASR_QUANTIZATION=int8
+# Empty = full precision (GigaAM-v3: 885 MB, best accuracy); int8 = 225 MB, slightly faster
+Environment=ASR_QUANTIZATION=
 Environment=ASR_PORT=5093
 Environment=ASR_THREADS=4
 # Unload the model after this many idle seconds (RAM back to ~50 MB)
