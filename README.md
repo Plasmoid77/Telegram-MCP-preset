@@ -112,3 +112,6 @@ telegram-mcp — отдельный проект под Apache-2.0. Его ко�
   ключ API открытой модели ([docs/HARNESSES.md](docs/HARNESSES.md)).
 - [ ] Перенос на домашний сервер: работа без входа в систему (`loginctl enable-linger`), часовой пояс.
 - [ ] Своё приложение на my.telegram.org (собственный `api_id`).
+- [ ] Когда примут [chigwell/telegram-mcp#409](https://github.com/chigwell/telegram-mcp/pull/409)
+  (догонять пропущенное после переподключения): обновить `TELEGRAM_MCP_REF` и включить
+  `TELEGRAM_CATCH_UP_INTERVAL=120` в `telegram-mcp.service`.
