@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram auto-responder: incoming messages -> one headless agent run each
+Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset
+Requires=telegram-mcp.service
+After=telegram-mcp.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/telegram-agent
+# Harness credentials (optional, mode 600): see agent/backend.env.example
+EnvironmentFile=-%h/.local/share/telegram-agent/backend.env
+ExecStart=/usr/bin/python3 -I %h/.local/share/telegram-agent/dispatcher.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

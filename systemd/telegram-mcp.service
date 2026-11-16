@@ -1,0 +1,25 @@
+[Unit]
+Description=telegram-mcp shared MCP server (HTTP, 127.0.0.1:8765, all tools)
+Documentation=https://github.com/chigwell/telegram-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/telegram-mcp
+# Secrets (API id/hash, session) live in .env (mode 600), loaded by the server itself.
+Environment=MCP_TRANSPORT=http
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8765
+Environment=TELEGRAM_EXPOSED_TOOLS=all
+# File tools may only touch this folder (server roots only; client roots ignored)
+Environment=TELEGRAM_ALLOWED_ROOTS=%h/TelegramMCP
+Environment=TELEGRAM_SERVER_ROOTS_ONLY=1
+# Append settled incoming bursts to ~/.local/state/telegram-mcp/incoming_feed.jsonl
+Environment=TELEGRAM_EVENT_FEED=1
+ExecStart=%h/.local/share/telegram-mcp/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
