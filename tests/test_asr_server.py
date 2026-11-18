@@ -3,7 +3,7 @@
 Recognition is stubbed, so neither onnx-asr nor a model is needed.
 Run: python3 -m unittest discover -s tests -v
 """
-import importlib.util, json, threading, unittest, urllib.error, urllib.request, uuid
+import importlib.util, json, shutil, subprocess, tempfile, threading, unittest, urllib.error, urllib.request, uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -84,6 +84,34 @@ class AsrHttp(unittest.TestCase):
         with urllib.request.urlopen(self.url + "/health") as r:
             d = json.loads(r.read())
         self.assertEqual(d["data"][0]["id"], asr.MODEL)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+class Decode(unittest.TestCase):
+    """Real ffmpeg on generated media; the model is not involved."""
+
+    def make(self, *args):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "x.mp4"
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", *args, str(out)], check=True)
+            return out.read_bytes()
+
+    def test_video_note_with_index_at_the_end(self):
+        """Telegram video notes: mp4 with moov after mdat, which a pipe cannot seek to."""
+        data = self.make("-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-f", "lavfi",
+                         "-i", "testsrc2=size=320x320:rate=30:duration=4", "-c:a", "aac",
+                         "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-shortest")
+        self.assertGreater(data.find(b"moov"), data.find(b"mdat"), "fixture: index at the end")
+        piped = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "quiet", "-i", "pipe:0", "-vn",
+                                "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"],
+                               input=data, capture_output=True).stdout
+        self.assertEqual(piped, b"", "fixture: too big for ffmpeg to reach the index on a pipe")
+        self.assertAlmostEqual(len(asr.decode(data)) / asr.SR, 4.0, delta=0.2)
+
+    def test_video_without_sound_is_a_decode_error(self):
+        data = self.make("-f", "lavfi", "-i", "color=size=64x64:duration=1", "-c:v", "libx264")
+        with self.assertRaises((asr.NoAudio, subprocess.CalledProcessError)):
+            asr.decode(data)
 
 
 if __name__ == "__main__":

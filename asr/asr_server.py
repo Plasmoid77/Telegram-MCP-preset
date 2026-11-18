@@ -12,7 +12,7 @@ request and unloaded after ASR_IDLE_UNLOAD seconds without requests.
 
 Part of Telegram-MCP-preset: https://github.com/Plasmoid77/Telegram-MCP-preset
 """
-import gc, json, os, subprocess, sys, threading, time
+import gc, json, os, subprocess, sys, tempfile, threading, time
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,12 +62,25 @@ def _unloader():
                 log("model unloaded (idle)")
 
 
+class NoAudio(ValueError):
+    """ffmpeg produced no samples: not audio, or no audio track."""
+
+
 def decode(data):
-    """Any audio ffmpeg understands -> 16 kHz mono float32 array, at most MAX_SECONDS long."""
+    """Any audio ffmpeg understands -> 16 kHz mono float32 array, at most MAX_SECONDS long.
+
+    The input goes through a temporary file, not a pipe: a Telegram video note is an mp4 with
+    its index (moov) at the end, which ffmpeg cannot reach on a pipe and then outputs nothing.
+    """
     import numpy as np
-    raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", "pipe:0", "-t", str(MAX_SECONDS),
-                          "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"],
-                         input=data, capture_output=True, check=True, timeout=DECODE_TIMEOUT).stdout
+    with tempfile.NamedTemporaryFile(prefix="asr-", suffix=".bin") as f:
+        f.write(data)
+        f.flush()
+        raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", f.name, "-vn",
+                              "-t", str(MAX_SECONDS), "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"],
+                             capture_output=True, check=True, timeout=DECODE_TIMEOUT).stdout
+    if len(raw) < 2:
+        raise NoAudio("no audio decoded")
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
@@ -121,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         t0 = time.time()
         try:
             text, dur = transcribe(parts["file"].get_payload(decode=True), field("language") or None)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, NoAudio):
             return self._json(400, {"error": {"message": "could not decode audio"}})
         except Exception as e:  # keep serving
             log(f"error: {e!r}")
