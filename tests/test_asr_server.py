@@ -86,7 +86,7 @@ class AsrHttp(unittest.TestCase):
         self.assertEqual(d["data"][0]["id"], asr.MODEL)
 
 
-@unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+@unittest.skipUnless(shutil.which("ffmpeg") and importlib.util.find_spec("numpy"), "needs ffmpeg and numpy")
 class Decode(unittest.TestCase):
     """Real ffmpeg on generated media; the model is not involved."""
 
