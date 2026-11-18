@@ -33,9 +33,9 @@ class AsrHttp(unittest.TestCase):
     def setUpClass(cls):
         cls.calls = []
 
-        def fake(data, language=None):
-            cls.calls.append((data, language))
-            return "Привет, мир.", 3.5
+        def fake(data, language=None, timestamps=False):
+            cls.calls.append((data, language, timestamps))
+            return "Привет, мир. Пока.", 3.5, [(0.0, 1.2, "Привет, мир."), (1.5, 3.5, "Пока.")]
 
         asr.transcribe = fake
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), asr.Handler)
@@ -62,16 +62,25 @@ class AsrHttp(unittest.TestCase):
                                        "language": "ru", "file": ("voice.ogg", voice, "audio/ogg")})
         self.assertEqual(code, 200)
         self.assertIn("application/json", ctype)
-        self.assertEqual(json.loads(body), {"text": "Привет, мир."})
-        self.assertEqual(self.calls[-1], (voice, "ru"))
+        self.assertEqual(json.loads(body), {"text": "Привет, мир. Пока."})
+        self.assertEqual(self.calls[-1], (voice, "ru", False))
 
     def test_text_and_verbose_json(self):
         f = ("v.ogg", b"x", "audio/ogg")
         code, ctype, body = self.post({"file": f, "response_format": "text"})
-        self.assertEqual((code, body), (200, "Привет, мир."))
+        self.assertEqual((code, body), (200, "Привет, мир. Пока."))
         self.assertIn("text/plain", ctype)
         code, _, body = self.post({"file": f, "response_format": "verbose_json"})
         self.assertEqual(json.loads(body)["duration"], 3.5)
+
+    def test_verbose_json_segments_keep_their_times(self):
+        """view_video puts speech on the video's clock from these segments."""
+        code, _, body = self.post({"file": ("v.ogg", b"x", "audio/ogg"), "response_format": "verbose_json"})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["segments"], [
+            {"id": 0, "start": 0.0, "end": 1.2, "text": "Привет, мир."},
+            {"id": 1, "start": 1.5, "end": 3.5, "text": "Пока."}])
+        self.assertTrue(self.calls[-1][2], "verbose_json asks for pause-cut segments")
 
     def test_errors(self):
         code, _, body = self.post({"model": "x"})

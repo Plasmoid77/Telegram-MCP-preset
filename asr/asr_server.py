@@ -84,17 +84,22 @@ def decode(data):
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def transcribe(data, language=None):
+def transcribe(data, language=None, timestamps=False):
+    """(text, seconds, [(start, end, text)]). timestamps: cut even short audio at pauses."""
     kw = {"language": language} if language and "whisper" in MODEL.lower() else {}
     with _lock:
         wav = decode(data)
         asr, vad = _models()
-        if len(wav) <= SHORT_S * SR:
-            text = asr.recognize(wav, sample_rate=SR, **kw)
-        else:
-            text = " ".join(s.text.strip() for s in vad.recognize(wav, sample_rate=SR, **kw) if s.text.strip())
+        dur = len(wav) / SR
+        if len(wav) <= SHORT_S * SR and not timestamps:
+            text = asr.recognize(wav, sample_rate=SR, **kw).strip()
+            segments = [(0.0, dur, text)] if text else []
+        else:  # VAD cuts at pauses: each piece keeps its place in the recording
+            segments = [(s.start, s.end, s.text.strip())
+                        for s in vad.recognize(wav, sample_rate=SR, **kw) if s.text.strip()]
+            text = " ".join(t for _, _, t in segments)
         _state["last"] = time.monotonic()
-    return text.strip(), len(wav) / SR
+    return text, dur, segments
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -133,7 +138,8 @@ class Handler(BaseHTTPRequestHandler):
         fmt = field("response_format", "json")
         t0 = time.time()
         try:
-            text, dur = transcribe(parts["file"].get_payload(decode=True), field("language") or None)
+            text, dur, segments = transcribe(parts["file"].get_payload(decode=True), field("language") or None,
+                                             timestamps=fmt == "verbose_json")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, NoAudio):
             return self._json(400, {"error": {"message": "could not decode audio"}})
         except Exception as e:  # keep serving
@@ -144,7 +150,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, text.encode(), "text/plain; charset=utf-8")
         out = {"text": text}
         if fmt == "verbose_json":
-            out.update(duration=dur, language=field("language") or None)
+            out.update(duration=dur, language=field("language") or None,
+                       segments=[{"id": i, "start": round(a, 2), "end": round(b, 2), "text": t}
+                                 for i, (a, b, t) in enumerate(segments)])
         self._json(200, out)
 
     def log_message(self, *a):  # requests are logged in do_POST
