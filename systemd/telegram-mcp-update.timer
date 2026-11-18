@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly check for a new telegram-mcp release
+Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset
+
+[Timer]
+OnCalendar=weekly
+# Run on the next boot if the machine was off at the scheduled time
+Persistent=true
+RandomizedDelaySec=2h
+
+[Install]
+WantedBy=timers.target

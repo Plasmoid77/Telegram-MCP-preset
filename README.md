@@ -26,6 +26,8 @@
   - **Секретарь:** важные чужие обращения пересылает владельцу.
   - **Память:** «запомни…» от владельца → файл `memory.md`, подмешивается в каждый запуск.
   - **Большие задачи:** прочитать весь форумный топик (сотни сообщений) и выложить сводку.
+  - **Новые версии сервера:** раз в неделю сообщает владельцу о релизе upstream со списком
+    изменений. Обновление одной командой, с проверкой и автооткатом (`update_mcp.py apply`).
   - **Голосовые и кружки:** расшифровывает локально, на этой же машине (GigaAM-v3 E2E RNN-T
     в полной точности или любая модель onnx-asr).
 
@@ -52,9 +54,9 @@
 | Путь | Что это |
 |---|---|
 | [`install.sh`](install.sh) | установщик для текущего пользователя: сервер из upstream (тег), автоответчик, юниты. Повторный запуск безопасен |
-| [`agent/`](agent) | автоответчик: `dispatcher.py`, `prompt.md` (шаблон с `{{KEY}}`), `guard.py`, `reflow.py`, `settings.json`, `mcp.json`, `config.env.example`, `backend.env.example` |
+| [`agent/`](agent) | автоответчик: `dispatcher.py`, `update_mcp.py` (проверка и обновление сервера), `prompt.md` (шаблон с `{{KEY}}`), `guard.py`, `reflow.py`, `settings.json`, `mcp.json`, `config.env.example`, `backend.env.example` |
 | [`asr/`](asr) | `asr-server`: локальная расшифровка голосовых, OpenAI-совместимый API над onnx-asr |
-| [`systemd/`](systemd) | `telegram-mcp.service` (все несекретные настройки сервера), `telegram-agent.service`, `asr-server.service` |
+| [`systemd/`](systemd) | `telegram-mcp.service` (все несекретные настройки сервера), `telegram-agent.service`, `asr-server.service`, `telegram-mcp-update.timer` (раз в неделю сообщает о новых релизах сервера) |
 | [`server/env.example`](server/env.example) | шаблон секретов сервера (`.env`) |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | **полная установка с нуля**, включая домашний сервер и перенос |
 | [`docs/USAGE.md`](docs/USAGE.md) | как пользоваться, эксплуатация, журнал, диагностика, обновление |

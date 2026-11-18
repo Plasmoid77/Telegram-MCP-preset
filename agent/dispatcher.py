@@ -24,6 +24,9 @@ BASE = Path(__file__).resolve().parent
 FEED = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "telegram-mcp/incoming_feed.jsonl"
 STATE = BASE / "state/offset.json"
 CURSORS = BASE / "state/cursors.json"
+PAUSE = BASE / "state/pause"  # update_mcp.py apply: start no new runs while it exists
+PAUSE_ACK = BASE / "state/pause.ack"  # written while paused: no run is in progress
+PAUSE_MAX = 1800      # s: an older pause file is left over from a crash and is ignored
 MCP_URL = json.loads((BASE / "mcp.json").read_text())["mcpServers"]["telegram"]["url"]
 SETTLE = 6            # s of silence in a private chat before its burst is handled
 GROUP_SETTLE = 5      # s of silence in a group before its burst is handled
@@ -60,6 +63,14 @@ def load_config():
             k, v = line.split("=", 1)
             cfg[k.strip()] = v.strip()
     return cfg
+
+
+def paused():
+    """True while update_mcp.py holds a fresh pause file (no new runs, cursors stay put)."""
+    try:
+        return time.time() - PAUSE.stat().st_mtime < PAUSE_MAX
+    except OSError:
+        return False
 
 
 def cfg_list(cfg, key):
@@ -401,6 +412,7 @@ class Dispatcher:
         self.last_live = 0.0  # monotonic time of the last incoming live event
         self.misses = []      # monotonic times of periodic passes that found missed messages
         self.miss_pass = False
+        self.was_paused = False
 
     # --- hints ----------------------------------------------------------------------------
     def hint(self, cid, when, source):
@@ -604,8 +616,14 @@ class Dispatcher:
                 log(f"periodic pass error: {e}")
                 self.next_scan = now + RETRY
 
+        pause = paused()
+        if pause != self.was_paused:
+            log("paused by update_mcp.py: no new runs" if pause else "resumed")
+            self.was_paused = pause
+        if pause:  # runs are synchronous: the previous step's run has finished
+            PAUSE_ACK.touch()
         for cid, (when, source) in sorted(self.due.items(), key=lambda x: x[1][0]):
-            if when > time.monotonic():
+            if pause or when > time.monotonic():
                 continue
             del self.due[cid]
             try:
@@ -614,11 +632,12 @@ class Dispatcher:
                 log(f"chat={cid} read error: {e}")
                 self.hint(cid, time.monotonic() + RETRY, source)
                 self.next_scan = min(self.next_scan, time.monotonic() + RETRY)
-        self.check_stall()
+        if not pause:
+            self.check_stall()
 
         waits = [w for w, _ in self.due.values()] + [self.next_scan]
         waits += [p["last"] + (GROUP_SETTLE if p["group"] else SETTLE) for p in self.pending.values()]
-        timeout = 0 if lines else max(0, min(2, min(waits) - time.monotonic()))
+        timeout = 2 if pause else 0 if lines else max(0, min(2, min(waits) - time.monotonic()))
         try:
             self.poll_events(round(timeout, 1))
             self.settle_pending()

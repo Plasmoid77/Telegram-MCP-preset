@@ -58,7 +58,7 @@ if [[ ! -d $MCP_DIR/.git ]]; then
     git clone --quiet "$UPSTREAM" "$MCP_DIR"
     git -C "$MCP_DIR" -c advice.detachedHead=false checkout --quiet "$REF"
 else
-    say "telegram-mcp already in $MCP_DIR at $(git -C "$MCP_DIR" describe --tags --always) (upgrades are manual, docs/USAGE.md)"
+    say "telegram-mcp already in $MCP_DIR at $(git -C "$MCP_DIR" describe --tags --always) (upgrade: $AGENT_DIR/update_mcp.py apply)"
 fi
 (cd "$MCP_DIR" && uv sync --quiet)
 if [[ ! -e $MCP_DIR/.env ]]; then
@@ -73,6 +73,7 @@ install -d -m 700 "$AGENT_DIR/state"
 for f in dispatcher.py guard.py reflow.py settings.json mcp.json; do
     put "$SRC/agent/$f" "$AGENT_DIR/$f" 644
 done
+put "$SRC/agent/update_mcp.py" "$AGENT_DIR/update_mcp.py" 755
 keep "$SRC/agent/prompt.md" "$AGENT_DIR/prompt.md" 644
 keep "$SRC/agent/config.env.example" "$AGENT_DIR/config.env" 600
 keep "$SRC/agent/backend.env.example" "$AGENT_DIR/backend.env" 600
@@ -87,7 +88,8 @@ command -v ffmpeg >/dev/null 2>&1 || say "ffmpeg not found: install it, asr-serv
 
 # --- 4. systemd --user units ------------------------------------------------------------------
 mkdir -p "$UNIT_DIR"
-for u in telegram-mcp.service telegram-agent.service asr-server.service; do
+for u in telegram-mcp.service telegram-agent.service asr-server.service \
+         telegram-mcp-update.service telegram-mcp-update.timer; do
     put "$SRC/systemd/$u" "$UNIT_DIR/$u" 644
 done
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
@@ -103,5 +105,6 @@ cat <<EOF
     - secrets in $MCP_DIR/.env and Telegram login (step 4), in your own terminal
     - $AGENT_DIR/config.env (step 6)
     - systemctl --user enable --now asr-server telegram-mcp telegram-agent
+    - systemctl --user enable --now telegram-mcp-update.timer   (weekly: tells you about new releases)
     - loginctl enable-linger \$USER   (keep running without a login session)
 EOF

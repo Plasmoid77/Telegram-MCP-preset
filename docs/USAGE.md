@@ -108,6 +108,7 @@
 
 ```bash
 systemctl --user status telegram-mcp telegram-agent
+systemctl --user list-timers telegram-mcp-update            # когда следующая проверка релизов
 journalctl --user -u telegram-agent -f
 journalctl --user -u telegram-mcp -f
 tail -f ~/.local/state/telegram-mcp/incoming_feed.jsonl     # лента лички
@@ -134,6 +135,7 @@ systemctl --user enable --now telegram-agent
 | `live events: server restarted\|gap, reading history` | перезапускался сервер или переполнился его буфер: внеочередной проход по истории |
 | `chat=<id> new: id A..B (N) via feed\|events\|scan, oldest Ss` | взяты новые сообщения; `scan` — их нашла страховка, и если им больше минуты, живой поток их потерял |
 | `live updates look stalled ...: restarting telegram-mcp` | поток сервера завис, сервер перезапущен автоматически |
+| `paused by update_mcp.py: no new runs` / `resumed` | идёт `update_mcp.py apply`: новые ответы ждут, сообщения не теряются (курсоры стоят) |
 | `rate limit: skip ...` | сработал лимит |
 | `chat=<id> skip N message(s) older than MAX_AGE` | сообщения старше `MAX_AGE` не отвечены |
 | `TIMEOUT`, `non-json output`, `rc≠0` | проблема с агентом: логин, лимиты подписки или таймаут |
@@ -160,21 +162,34 @@ systemctl --user enable --now telegram-agent
 
 ## Обслуживание
 
-**Обновление telegram-mcp:**
+**Обновление telegram-mcp.** Само не ставится: сервер держит весь аккаунт, и чужой код запускается
+только после того, как владелец прочитал, что изменилось. Раз в неделю
+`telegram-mcp-update.timer` проверяет релизы upstream. О новом он пишет в журнал и один раз
+присылает сообщение в `NOTIFY_CHAT` со списком изменений и командой обновления.
 
 ```bash
-cd ~/.local/share/telegram-mcp
-git fetch --tags && git tag --sort=-v:refname | head -3
-git checkout vX.Y.Z && uv sync
-systemctl --user restart telegram-mcp telegram-agent      # когда бот не занят
+~/.local/share/telegram-agent/update_mcp.py status          # установлена / новейшая версия
+~/.local/share/telegram-agent/update_mcp.py apply           # до новейшей (или apply vX.Y.Z)
+journalctl --user -u telegram-mcp-update -n 30 --no-pager   # что нашла проверка
+systemctl --user start telegram-mcp-update                  # проверить сейчас
 ```
 
-Перед обновлением прочитайте release notes. Пресет зависит от формата ответов:
+`apply` показывает список PR и спрашивает подтверждение (`--yes` — без вопроса). Затем он:
 
-- `wait_for_events`, `get_messages_after`, `list_folders`, `get_folder` — диспетчер;
-- обёртки `{"result": "<JSON>"}` — `reflow.py`.
+1. проверяет, что текущая версия работает (иначе ничего не трогает);
+2. ставит диспетчер на паузу (файл `state/pause`: новые ответы не начинаются, курсоры стоят),
+   ждёт подтверждения, что текущий ответ закончен, и останавливает `telegram-agent`;
+3. переключает checkout на тег, делает `uv sync` и перезапускает `telegram-mcp`;
+4. вызывает то, от чего зависит диспетчер (`get_me`, `wait_for_events`, `list_chats`,
+   `get_messages_after`, `list_folders`), и запускает `telegram-agent`.
 
-После обновления проверьте: в журнале нет `live events error` и `read error`, бот отвечает в личке и в группе.
+Любой сбой — откат на прежнюю версию тем же путём. Локальные правки в
+`~/.local/share/telegram-mcp` обновление блокируют.
+
+Перед обновлением прочитайте список изменений. Автопроверка формата не ловит всё:
+обёртки `{"result": "<JSON>"}` использует `reflow.py`, а `get_folder` — список групп. После
+обновления проверьте: в журнале нет `live events error` и `read error`, бот отвечает в личке и
+в группе. Тег в `install.sh` остаётся тем, на котором пресет проверен.
 
 **Обновление пресета:**
 

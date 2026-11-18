@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a new telegram-mcp release (report only: journal + Telegram message, installs nothing)
+Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset
+After=network-online.target telegram-mcp.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/telegram-agent
+ExecStart=/usr/bin/python3 -I %h/.local/share/telegram-agent/update_mcp.py check

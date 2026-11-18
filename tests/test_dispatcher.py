@@ -2,7 +2,7 @@
 
 Run: python3 -m unittest discover -s tests -v
 """
-import importlib.util, json, tempfile, time, unittest
+import importlib.util, json, os, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -288,6 +288,37 @@ class Persist(unittest.TestCase):
             c2 = D.Cursors(p)
             self.assertEqual((c2.chats, c2.bots, c2.since), ({-100: 7}, {4}, c.since))
 
+
+class Pause(Base):
+    """update_mcp.py apply: a pause file stops new runs; the ack says none is in progress."""
+
+    def setUp(self):
+        super().setUp()
+        t = Path(self.tmp.name)
+        for name, val in (("PAUSE", t / "pause"), ("PAUSE_ACK", t / "pause.ack"),
+                          ("FEED", t / "no-feed"), ("load_config", lambda: dict(CFG)),
+                          ("folder_groups", lambda mcp, title: set())):
+            mock.patch.object(D, name, val).start()
+        self.chat(OWNER, "private", msg(10, 20))
+        self.d.next_scan = time.monotonic() + 999
+        self.d.hint(OWNER, 0, "feed")
+
+    def test_paused_starts_no_run_and_acks(self):
+        D.PAUSE.touch()
+        self.d.step()
+        self.assertEqual(self.runs, [])
+        self.assertTrue(D.PAUSE_ACK.exists())
+        self.assertNotIn(OWNER, self.cur.chats, "the cursor stays: the message is answered later")
+        D.PAUSE.unlink()
+        self.d.step()
+        self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
+
+    def test_stale_pause_file_is_ignored(self):
+        D.PAUSE.touch()
+        old = time.time() - D.PAUSE_MAX - 1
+        os.utime(D.PAUSE, (old, old))
+        self.d.step()
+        self.assertEqual(len(self.runs), 1)
 
 if __name__ == "__main__":
     unittest.main()

@@ -170,6 +170,13 @@ systemctl --user enable --now telegram-agent
 journalctl --user -u telegram-agent -f
 ```
 
+Проверка новых релизов telegram-mcp раз в неделю. Она только сообщает (журнал и сообщение в
+`NOTIFY_CHAT`), а обновление запускается вручную (`docs/USAGE.md`, «Обслуживание»):
+
+```bash
+systemctl --user enable --now telegram-mcp-update.timer
+```
+
 ## 10. Работа без входа в систему (сервер, перезагрузки)
 
 Пользовательские сервисы стартуют при входе пользователя и останавливаются при выходе. На сервере
