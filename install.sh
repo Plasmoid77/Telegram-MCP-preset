@@ -70,7 +70,7 @@ install -d -m 700 "$FILES_DIR"
 # --- 2. telegram-agent ----------------------------------------------------------------------
 mkdir -p "$AGENT_DIR"
 install -d -m 700 "$AGENT_DIR/state"
-for f in dispatcher.py guard.py reflow.py settings.json mcp.json; do
+for f in dispatcher.py gateway.py harnesses.py guard.py reflow.py settings.json mcp.json; do
     put "$SRC/agent/$f" "$AGENT_DIR/$f" 644
 done
 put "$SRC/agent/update_mcp.py" "$AGENT_DIR/update_mcp.py" 755

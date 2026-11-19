@@ -80,6 +80,7 @@
 | `SELF_ID` | `987654321` | id аккаунта-бота; его сообщения игнорируются |
 | `ACCOUNT_NAME`, `BOT_NAME` | `Proxy`, `Нейросетевой Doom bot` | подставляются в промпт |
 | `NOTIFY_CHAT` | = `OWNER_ID` | куда слать уведомления секретаря; `me` — «Избранное» бота |
+| `HARNESS` | `claude`, `codex`, `opencode`, `command` | [бэкенд](HARNESSES.md) |
 | `MODEL` | `claude-sonnet-5-5` | модель |
 | `MAX_TURNS` / `RUN_TIMEOUT` | 15 / 300 | шаги и секунды на запуск гостя |
 | `OWNER_MAX_TURNS` / `OWNER_RUN_TIMEOUT` | 40 / 900 | то же для владельца |
@@ -90,7 +91,8 @@
 | `GROUPS` | `-100…` | группы вручную, через запятую |
 | `GROUP_TRIGGERS` | `Думбот,Джарвис,бот` | слова-обращения |
 | `FILES_DIR` | `~/TelegramMCP` | должен совпадать с `TELEGRAM_ALLOWED_ROOTS` сервера |
-| `CLAUDE_BIN` | — | путь к `claude`, если не найден сам |
+| `CLAUDE_BIN`, `CODEX_BIN`, `OPENCODE_BIN` | — | путь к CLI, если он не найден автоматически |
+| `HARNESS_COMMAND` | — | доверенная команда для `HARNESS=command` |
 
 **Константы в `dispatcher.py`:**
 
@@ -101,7 +103,7 @@
 
 **Когда применяются изменения:**
 
-- `dispatcher.py` — после `systemctl --user restart telegram-agent`;
+- `dispatcher.py`, `gateway.py`, `harnesses.py` — после `systemctl --user restart telegram-agent`;
 - `prompt.md`, `memory.md`, `config.env`, хуки и `settings.json` — со следующего запуска бота.
 
 ## Команды
@@ -115,7 +117,7 @@ tail -f ~/.local/state/telegram-mcp/incoming_feed.jsonl     # лента лич�
 cat ~/.local/share/telegram-agent/memory.md                 # память бота
 
 # идёт ли сейчас запуск бота (проверяйте перед перезапуском диспетчера)
-pgrep -af "^$HOME/.local/bin/claude -p" | cut -c1-120
+systemctl --user status telegram-agent
 
 systemctl --user disable --now telegram-agent   # выключить автоответчик (MCP работает дальше)
 systemctl --user enable --now telegram-agent
@@ -128,7 +130,7 @@ systemctl --user enable --now telegram-agent
 
 | Строка | Значит |
 |---|---|
-| `chat=<id> tier=owner\|guest rc=0 error=False subtype=success turns=N Ts` | ответ выполнен. Пишется по **завершении** запуска. Отрицательный id — группа |
+| `chat=<id> tier=owner\|guest rc=0 error=False …` | бэкенд завершил запуск. Отрицательный id обозначает группу |
 | `groups folder '<имя>': [...]` | изменился список групп |
 | `groups folder read error (keeping [...])` | папку прочитать не удалось, работает прежний список |
 | `live events error: ...`, `chat=<id> read error: ...`, `periodic pass error: ...` | MCP или Telegram недоступен. Повтор через 30 с, потом страховочный проход |
