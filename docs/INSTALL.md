@@ -1,7 +1,7 @@
 # Установка с нуля
 
 Полная установка на Linux с systemd: ноутбук, ПК или домашний сервер. Пути даны для текущего
-пользователя (`~`), root не нужен; исключение — `loginctl enable-linger` на сервере.
+пользователя (`~`), установщик работает без root. Права администратора нужны для системных пакетов и `linger` на сервере.
 
 ## 0. Что понадобится
 
@@ -12,13 +12,17 @@
 | `api_id` / `api_hash` | приложение на [my.telegram.org](https://my.telegram.org/apps): Platform — Desktop, short name без дефиса. Можно создать на любом своём аккаунте |
 | Linux с systemd, Python ≥ 3.10, `git`, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), `ffmpeg` | сервер, диспетчер, расшифровка голосовых |
 | ~1.5 ГБ на диске сверх telegram-mcp | `asr-server`: окружение 160 МБ + модель GigaAM-v3 885 МБ (скачивается при первом голосовом; `int8` — 225 МБ) |
-| [Claude Code](https://code.claude.com/docs/en/setup) с подпиской Claude или ключом API | агент, который отвечает (другие агенты — [HARNESSES.md](HARNESSES.md)) |
+| Claude Code, Codex или OpenCode с рабочей авторизацией | агент, который отвечает. См. [варианты настройки](HARNESSES.md) |
 | Телефон с Telegram аккаунта-бота | войти по QR-коду |
 
 Правило для всей установки: **секреты (`api_hash`, строка сессии, файл `*.session`, ключи API)
 вводит человек в своём терминале.** Их не вставляют в чат с ИИ, не коммитят и не пересылают.
 
 ## 1. Скачать пресет и запустить установщик
+
+На Debian, Ubuntu или LMDE системные зависимости можно поставить командой
+`sudo apt install git python3 ffmpeg`. Установите [uv](https://docs.astral.sh/uv/getting-started/installation/)
+и проверьте, что `uv --version` работает из вашего терминала.
 
 ```bash
 git clone https://github.com/Plasmoid77/Telegram-MCP-preset ~/Telegram-MCP-preset
@@ -35,7 +39,7 @@ cd ~/Telegram-MCP-preset
 3. Создаёт папку `~/TelegramMCP` (700). Это единственная папка, с которой работают файловые
    инструменты MCP.
 4. Ставит автоответчик в `~/.local/share/telegram-agent/`:
-   - код: `dispatcher.py`, `guard.py`, `reflow.py`, `settings.json`, `mcp.json`;
+   - код: `dispatcher.py`, `gateway.py`, `harnesses.py`, `guard.py`, `reflow.py`, `settings.json`, `mcp.json`;
    - если их ещё нет — `prompt.md`, `config.env` (600) и `backend.env` (600).
 5. Ставит `asr-server` (локальная расшифровка голосовых, onnx-asr) в
    `~/.local/share/asr-server/` по зафиксированному `asr/uv.lock`.
@@ -95,8 +99,11 @@ uv run session_string_generator.py --qr      # QR: Telegram на телефон�
 systemctl --user enable --now asr-server     # расшифровка голосовых, нужна серверу ниже
 systemctl --user enable --now telegram-mcp
 journalctl --user -u telegram-mcp -n 20 --no-pager
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/mcp   # любой код кроме 000 = слушает
+curl -fsS http://127.0.0.1:5093/health
+systemctl --user is-active asr-server telegram-mcp
 ```
+
+Подключите клиент по шагу 8 и вызовите `get_me`, чтобы подтвердить вход в нужный аккаунт.
 
 Настройки сервера лежат в юните. Что выбрано и почему — в [PRESET.md](PRESET.md#1-настройки-сервера):
 
@@ -122,28 +129,24 @@ TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LAN
 | `NOTIFY_CHAT` | куда слать уведомления секретаря: обычно = `OWNER_ID` |
 | `BOT_NAME` | имя персоны (по умолчанию «Нейросетевой Doom bot») |
 | `GROUP_TRIGGERS` | слова-обращения в группах, через запятую. Впишите и имя аккаунта |
-| `MODEL` | модель агента |
+| `HARNESS`, `MODEL` | бэкенд и модель по шагу 7 |
 
 Остальные ключи описаны в [USAGE.md](USAGE.md#configenv). Файл перечитывается на лету.
 
 Характер бота задаёт `prompt.md`. `{{KEY}}` в нём подставляются из `config.env`.
 
-## 7. Агент: Claude Code
+## 7. Установить и авторизовать агент
 
-```bash
-curl -fsSL https://claude.ai/install.sh | bash   # официальный установщик → ~/.local/bin/claude
-claude                                           # один раз: /login
-```
+Команды входа выполняйте под тем же пользователем, что запускает службы.
 
-- **Сервер без браузера.** На машине с браузером выполните `claude setup-token` и впишите токен в
-  `~/.local/share/telegram-agent/backend.env` как `CLAUDE_CODE_OAUTH_TOKEN=…` (файл 600).
-  Вместо подписки можно указать `ANTHROPIC_API_KEY=…`.
-- **Другой путь к `claude`.** Если он стоит не в `~/.local/bin` и не в `PATH` сервиса, укажите
-  `CLAUDE_BIN=` в `config.env`.
+| Бэкенд | Как подготовить | Что указать в `config.env` |
+|---|---|---|
+| [Claude Code](https://code.claude.com/docs/en/setup) | Установить и выполнить `claude auth login`. Для headless-сервера можно использовать `claude setup-token` или ключ Anthropic в `backend.env` | `HARNESS=claude`, `MODEL=claude-sonnet-5-5` |
+| [Codex](https://learn.chatgpt.com/docs/non-interactive-mode) | Установить CLI и выполнить `codex login` или `codex login --device-auth`. Проверить `codex login status` | `HARNESS=codex`, `MODEL=gpt-6.2-sol` |
+| [OpenCode](https://opencode.ai/docs/) | Установить CLI v2.3.2 или новее. В `opencode` выполнить `/connect`, выбрать провайдера, проверить модели через `/models` | `HARNESS=opencode`, например `MODEL=opencode-go/qwen3.7-plus` |
 
-Для запусков бота auto-memory Claude Code выключена принудительно, и это нельзя убирать. Если
-домашняя папка — git-репозиторий, иначе бот подхватил бы ваш личный `MEMORY.md`. Подробнее — в
-[PRESET.md](PRESET.md#изоляция).
+Идентификаторы моделей в таблице — примеры. Выберите доступную модель своего провайдера.
+В [HARNESSES.md](HARNESSES.md) описаны дополнительные настройки и формат внешнего раннера.
 
 ## 8. (По желанию) Подключить MCP к своим интерактивным агентам
 
@@ -161,7 +164,15 @@ Codex (`~/.codex/config.toml`):
 url = "http://127.0.0.1:8765/mcp"
 ```
 
-Любой другой клиент: streamable HTTP, `http://127.0.0.1:8765/mcp`.
+OpenCode v2, в каталоге своего проекта:
+
+```bash
+opencode mcp add telegram --url http://127.0.0.1:8765/mcp
+opencode mcp list
+```
+
+Клиент владельца получает доступ ко всему аккаунту. Оставьте адрес на loopback. Автоответчик
+подключается отдельно согласно выбранному `HARNESS`.
 
 ## 9. Запустить автоответчик
 
@@ -191,7 +202,7 @@ sudo loginctl enable-linger "$USER"
 - **Часовой пояс.** Бот получает «текущее время» по часовому поясу машины. Установите его:
   `timedatectl set-timezone Europe/Moscow`.
 - **Сон и выключение.** Пока машина спит или выключена, бот не отвечает. Пропущенные за это время
-  личные сообщения потом не обрабатываются.
+  обращения обрабатываются после запуска, пока их возраст укладывается в `MAX_AGE` и они доступны в истории.
 
 ## 11. Проверка
 
@@ -225,11 +236,32 @@ sudo loginctl enable-linger "$USER"
 
 ## Удаление
 
+Остановите автоответчик после завершения текущего запроса. На компьютере, где он установлен,
+выполните:
+
 ```bash
+systemctl --user disable --now telegram-mcp-update.timer
+systemctl --user stop telegram-mcp-update.service
 systemctl --user disable --now telegram-agent telegram-mcp asr-server
-rm ~/.config/systemd/user/{telegram-agent,telegram-mcp,asr-server}.service && systemctl --user daemon-reload
-rm -r ~/.local/share/telegram-agent ~/.local/share/telegram-mcp   # вместе с сессией!
-rm -r ~/.local/share/asr-server ~/.cache/huggingface/hub/models--istupakov--*
+
+unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+rm -f -- "$unit_dir"/{telegram-agent,telegram-mcp,asr-server,telegram-mcp-update}.service
+rm -f -- "$unit_dir/telegram-mcp-update.timer"
+systemctl --user daemon-reload
 ```
 
-После этого завершите сессию в Telegram: «Настройки → Устройства».
+На телефоне завершите сессию аккаунта-бота в **Настройки → Устройства**. Уберите запись
+`telegram` из MCP-конфигов, в которые добавляли её через шаг 8.
+
+Остановка сохраняет конфигурацию и данные. Если они больше не нужны, удалите их отдельно.
+Следующие команды удалят сессию, ключи, память, настройки и ленту событий. Сохраните нужные
+экспорты и резервные копии заранее.
+
+```bash
+rm -r -- ~/.local/share/telegram-agent ~/.local/share/telegram-mcp ~/.local/share/asr-server
+rm -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/telegram-mcp"
+```
+
+Каталог с исходниками и `~/TelegramMCP` с экспортами удалите при необходимости. `linger`
+можно выключить через `sudo loginctl disable-linger "$USER"`, если он был включён только для
+пресета.

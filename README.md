@@ -44,7 +44,7 @@
                               telegram-agent.service (dispatcher.py, только stdlib)
                                           │ на каждое обращение:
                                           ▼
-                 агент: claude -p + prompt.md + memory.md + хуки guard.py / reflow.py
+                 агент: Claude Code, Codex, OpenCode или внешний раннер
 ```
 
 Подробно — [docs/PRESET.md](docs/PRESET.md).
@@ -61,7 +61,7 @@
 | [`docs/INSTALL.md`](docs/INSTALL.md) | **полная установка с нуля**, включая домашний сервер и перенос |
 | [`docs/USAGE.md`](docs/USAGE.md) | как пользоваться, эксплуатация, журнал, диагностика, обновление |
 | [`docs/PRESET.md`](docs/PRESET.md) | **что настроено под себя** относительно upstream и почему, модель безопасности, история исправлений |
-| [`docs/HARNESSES.md`](docs/HARNESSES.md) | другие агенты вместо Claude Code (Qwen Code, Hermes, DeepSeek, OpenCode): что есть и план |
+| [`docs/HARNESSES.md`](docs/HARNESSES.md) | бэкенды и подключение внешнего раннера |
 | [`AGENTS.md`](AGENTS.md) | инструкция для ИИ-агента, которому поручили установку |
 | [`tests/`](tests) | тесты хуков и HTTP-слоя `asr-server` (`python3 -m unittest discover -s tests`) |
 
@@ -77,7 +77,7 @@ cd Telegram-MCP-preset
 1. Впишите `api_id`/`api_hash` и войдите в Telegram в **своём** терминале. Строка сессии не
    должна проходить через чат с ИИ.
 2. Заполните `~/.local/share/telegram-agent/config.env`: ваш id, id аккаунта бота, имена.
-3. Войдите в Claude Code.
+3. Выберите агент в `HARNESS`, задайте `MODEL` и войдите в CLI под пользователем службы.
 4. `systemctl --user enable --now asr-server telegram-mcp telegram-agent`.
 
 Поручить установку ИИ-агенту можно: дайте ему этот репозиторий и [AGENTS.md](AGENTS.md). Секреты
@@ -85,12 +85,10 @@ cd Telegram-MCP-preset
 
 ## Агент (harness)
 
-Сейчас автоответчик запускает **Claude Code** (`claude -p`). Он опирается на его возможности:
-список разрешённых инструментов на запуск, PreToolUse-хук, блокирующий вызов по аргументам, и
-PostToolUse-хук, подменяющий результат.
-
-Открытые агенты вроде Qwen Code и Hermes Agent с моделями DeepSeek/Qwen умеют это лишь частично.
-Как сделать пресет независимым от агента — в [docs/HARNESSES.md](docs/HARNESSES.md).
+Автоответчик поддерживает Claude Code, Codex и OpenCode. Другой headless-агент подключается
+через `HARNESS=command`. Для Codex, OpenCode и внешнего раннера временный MCP-шлюз проверяет
+доступ к Telegram по текущему чату и роли. См. [бэкенды](docs/HARNESSES.md),
+[чистую установку](docs/INSTALL.md) и [удаление](docs/INSTALL.md#удаление).
 
 ## Проверено
 
@@ -100,7 +98,6 @@ PostToolUse-хук, подменяющий результат.
   управление списком групп из лички; чтение топика на 322 сообщения и публикация сводки;
   память; блокировки guard. Список и история — в [docs/PRESET.md](docs/PRESET.md).
 - **Тесты:** `install.sh` в чистой домашней папке; тесты хуков.
-- **Не проверено:** другие агенты и модели.
 
 ## Лицензия
 
@@ -110,7 +107,6 @@ telegram-mcp — отдельный проект под Apache-2.0. Его ко�
 
 ## Планы
 
-- [ ] Открытые агенты (Qwen Code, Hermes, DeepSeek) через MCP-шлюз `tg-gate` — когда появится
-  ключ API открытой модели ([docs/HARNESSES.md](docs/HARNESSES.md)).
+- [x] Codex, OpenCode и интерфейс для других headless-раннеров.
 - [ ] Перенос на домашний сервер: работа без входа в систему (`loginctl enable-linger`), часовой пояс.
 - [ ] Своё приложение на my.telegram.org (собственный `api_id`).
