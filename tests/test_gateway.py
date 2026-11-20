@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 from gateway import Gateway, TelegramScope, TEXT_PAGE, text_result
 from harnesses import machine_success, opencode_config, opencode_header_timeout
-from web_research import Results, query_from_messages, requested_query
+from web_research import Results, contains_private_identifier, fetch_sources, requested_query
 
 
 class Upstream:
@@ -162,36 +162,35 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(parser.results, [{"url": "https://python.org", "title": "Python & docs",
                                            "snippet": "Stable releases"}])
 
-    def test_expanded_query_recovers_the_literal_versioned_name(self):
-        messages = ("Насколько локальная модель лучше или хуже ChatGPT 6.2 Sol?",)
-        self.assertEqual(query_from_messages("GPT-6.2 Sol модель OpenAI", messages), "ChatGPT 6.2 Sol")
-        self.assertEqual(query_from_messages("характеристики Qwen-3.8 Flash для Codex",
-                                             ("Сравни Qwen3.8 Flash с Sol.",)), "Qwen3.8 Flash")
-        self.assertEqual(query_from_messages("GPT-6.2 Sol модель OpenAI",
-                                             ("Найди GPT‑6.2 Sol.",)), "GPT‑6.2 Sol")
-        self.assertIsNone(query_from_messages("GPT 6.2", ("Найди GPT 6.2.1.",)))
-        self.assertIsNone(query_from_messages("Qwen 3.8 Flash", ("Найди Qwen 3.8 Flash-Pro.",)))
-        self.assertIsNone(query_from_messages("Qwen 3.8 Flash Alibaba", ("Найди Qwen 3.8 Flash–Pro.",)))
-        self.assertIsNone(query_from_messages("GPT-6.1 Sol модель OpenAI", messages))
-        self.assertIsNone(query_from_messages("GPT-6.2 Flash OpenAI", messages))
-        self.assertIsNone(query_from_messages("GPT-6.2 Sol OpenAI", ("Вот ChatGPT. 6.2 Sol.",)))
-        self.assertIsNone(query_from_messages("адрес из памяти", messages))
+    @patch("web_research.fetch_firecrawl", return_value=([{"url": "https://python.org"}], ""))
+    @patch("web_research.fetch", return_value=([], "HTTP 202"))
+    def test_search_falls_back_only_when_enabled_and_primary_fails(self, primary, fallback):
+        query = "Python release support"
+        self.assertEqual(fetch_sources(query, False), ([], "HTTP 202"))
+        fallback.assert_not_called()
+        self.assertEqual(fetch_sources(query, True), ([{"url": "https://python.org"}], ""))
+        fallback.assert_called_once_with(query)
+        primary.return_value = ([{"url": "https://peps.python.org"}], "")
+        self.assertEqual(fetch_sources(query, True), primary.return_value)
+        self.assertEqual(fallback.call_count, 1)
 
     @patch("gateway.web_research.search", return_value=([{"url": "https://python.org"}], ""))
-    def test_automatic_web_search_uses_only_current_text_and_then_restricts_tools(self, search):
-        cfg = {"SELF_ID": "5", "OWNER_ID": "101", "NOTIFY_CHAT": "me"}
-        texts = ("Какая последняя версия Python?",)
-        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=texts)
+    def test_automatic_web_search_accepts_a_generated_query_and_then_restricts_tools(self, search):
+        cfg = {"SELF_ID": "5", "OWNER_ID": "101", "NOTIFY_CHAT": "me", "WEB_SEARCH": "duckduckgo",
+               "WEB_SEARCH_FALLBACK": "firecrawl"}
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
         self.assertIn("search_web", scope.catalog)
         self.assertNotIn("search_web", TelegramScope(
-            self.upstream, -100, "owner", cfg, self.memory, web_messages=texts).catalog)
+            self.upstream, -100, "owner", cfg, self.memory).catalog)
         self.assertNotIn("search_web", TelegramScope(
-            self.upstream, 101, "guest", cfg, self.memory, web_messages=texts).catalog)
+            self.upstream, 101, "guest", cfg, self.memory).catalog)
+        self.assertNotIn("search_web", self.scope("owner").catalog)
         self.assertFalse(scope.call("get_history", {"chat_id": 101})["isError"])
-        self.assertTrue(scope.call("search_web", {"query": "from memory"})["isError"])
+        for query in (None, {}, "   ", "x" * 401):
+            self.assertTrue(scope.call("search_web", {"query": query})["isError"])
         self.assertTrue(scope.no_effects_attempted())
-        self.assertFalse(scope.call("search_web", {"query": "версия python"})["isError"])
-        search.assert_called_once_with("версия Python")
+        self.assertFalse(scope.call("search_web", {"query": " Python 3.13  end of life\nPEP 719 "})["isError"])
+        search.assert_called_once_with("Python 3.13 end of life PEP 719", fallback=True)
         self.assertFalse(scope.no_effects_attempted())
         self.assertTrue(scope.no_effects_attempted(allow_search=True))
         for name, args in (("memory_write", {"text": "untrusted"}),
@@ -203,47 +202,59 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(scope.call("send_message", {"chat_id": 101, "message": "summary"})["isError"])
         self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "duplicate"})["isError"])
 
+    @patch("gateway.web_research.search")
+    def test_web_rejects_private_identifiers_and_context_outside_owner_dm(self, search):
+        cfg = {"OWNER_ID": "101", "OWNER_USERNAME": "private_username", "WEB_SEARCH": "duckduckgo"}
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
+        for query in ("private_username recent disputes", "owner@example.com", "8 (999) 123-45-67",
+                      "connect to 192.168.1.2", "password: syntheticsecret", "ghp_exampletokenonly"):
+            self.assertTrue(scope.call("search_web", {"query": query})["isError"])
+        for name, args in (("get_history", {"chat_id": 900}), ("memory_read", {})):
+            scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
+            self.assertFalse(scope.call(name, args)["isError"])
+            self.assertTrue(scope.call("search_web", {"query": "Python release support"})["isError"])
+        search.assert_not_called()
+        self.assertFalse(contains_private_identifier("Python releases 2026-11-20"))
+
     @patch("gateway.web_research.search", return_value=([{"url": "https://example.com"}], ""))
     def test_public_model_and_comparison_use_two_distinct_queries(self, search):
-        cfg = {"OWNER_ID": "101", "MODEL": "provider/qwen3.8-flash", "WEB_SEARCH_PUBLIC_MODEL": "1"}
-        messages = ("Сравни свою модель с ChatGPT 6.2 Sol по цене.",)
-        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=messages)
+        cfg = {"OWNER_ID": "101", "MODEL": "provider/qwen3.8-flash", "WEB_SEARCH_PUBLIC_MODEL": "1",
+               "WEB_SEARCH": "duckduckgo"}
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
 
         first = scope.call("search_web", {"query": "GPT-6.2 Sol OpenAI"})
         self.assertFalse(first["isError"])
-        self.assertEqual(scope.call("search_web", {"query": "chatgpt 6.2 sol"}), first)
-        self.assertTrue(scope.call("search_web", {"query": "Qwen3.8 Flash-Pro"})["isError"])
+        self.assertEqual(scope.call("search_web", {"query": "gpt-6.2 sol openai"}), first)
         second = scope.call("search_web", {"query": "@model"})
         self.assertFalse(second["isError"])
         self.assertEqual(scope.call("search_web", {"query": "Qwen3.8 Flash"}), second)
         self.assertTrue(scope.call("search_web", {"query": "по цене"})["isError"])
         self.assertEqual([call.args for call in search.call_args_list],
-                         [("ChatGPT 6.2 Sol",), ("qwen3.8-flash",)])
+                         [("GPT-6.2 Sol OpenAI",), ("qwen3.8-flash",)])
 
         cfg["MODEL"] = "other-provider/another-model"
-        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=messages)
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
         self.assertFalse(scope.call("search_web", {"query": "@model"})["isError"])
-        search.assert_called_with("another-model")
+        search.assert_called_with("another-model", fallback=False)
 
     @patch("gateway.web_research.search")
     def test_model_search_requires_opt_in_and_an_owner_dm(self, search):
-        cfg = {"OWNER_ID": "101", "MODEL": "provider/private-model"}
+        cfg = {"OWNER_ID": "101", "MODEL": "provider/private-model", "WEB_SEARCH": "duckduckgo"}
         args = {"query": "@model"}
-        messages = ("Сравни свою модель с Python.",)
         for options, cid, tier in (
             (cfg, 101, "owner"),
             (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1"), 101, "guest"),
             (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1"), -100, "owner"),
             (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1", MODEL="provider/not a model ID"), 101, "owner"),
         ):
-            scope = TelegramScope(self.upstream, cid, tier, options, self.memory, web_messages=messages)
+            scope = TelegramScope(self.upstream, cid, tier, options, self.memory)
             self.assertTrue(scope.call("search_web", args)["isError"])
         search.assert_not_called()
 
     @patch("gateway.web_research.search")
     def test_telegram_mutation_blocks_web_lookup_and_backend_retry(self, search):
-        scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "OWNER_ID": "101"},
-                              self.memory, web_messages=("Python",))
+        cfg = {"SELF_ID": "5", "OWNER_ID": "101", "WEB_SEARCH": "duckduckgo"}
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
         self.assertFalse(scope.call("memory_write", {"text": "Owner rule"})["isError"])
         self.assertFalse(scope.no_effects_attempted())
         self.assertTrue(scope.call("search_web", {"query": "Python"})["isError"])
@@ -251,11 +262,11 @@ class GatewayTests(unittest.TestCase):
 
     @patch("gateway.web_research.search", return_value=([{"url": "https://openai.com"}], ""))
     def test_typing_keeps_search_and_reply_available(self, search):
-        scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "OWNER_ID": "101"},
-                              self.memory, web_messages=("Что такое ChatGPT 6.2 Sol?",))
+        cfg = {"SELF_ID": "5", "OWNER_ID": "101", "WEB_SEARCH": "duckduckgo"}
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory)
         self.assertFalse(scope.call("send_typing", {"chat_id": 101})["isError"])
         self.assertFalse(scope.no_effects_attempted())
         self.assertFalse(scope.call("search_web", {"query": "GPT-6.2 Sol OpenAI"})["isError"])
-        search.assert_called_once_with("ChatGPT 6.2 Sol")
+        search.assert_called_once_with("GPT-6.2 Sol OpenAI", fallback=False)
         self.assertFalse(scope.call("send_message", {"chat_id": 101, "message": "summary"})["isError"])
         self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "duplicate"})["isError"])

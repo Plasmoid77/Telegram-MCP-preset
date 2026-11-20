@@ -1,4 +1,4 @@
-"""Read-only web research from the owner's current DM and an opted-in public model ID."""
+"""Read-only search for public web sources."""
 
 from html.parser import HTMLParser
 from http.client import HTTPException, HTTPSConnection
@@ -13,19 +13,19 @@ QUERY = re.compile(r"^/web(?:\s+|$)", re.IGNORECASE)
 MAX_QUERY = 400
 MAX_RESULTS = 6
 HOST = "lite.duckduckgo.com"
+FIRECRAWL_HOST = "api.firecrawl.dev"
 DASHES = str.maketrans("‐‑‒–—−", "------")
 MODEL_ID = re.compile(r"[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*")
-VERSIONED_NAME = re.compile(
-    r"\b([a-z][a-z0-9]*?)[ _-]*(\d+(?:\.\d+)+)"
-    r"(?:[ _-]+([a-z][a-z0-9]*(?:-[a-z0-9]+)*))?(?!\w|\.\d|-\w)",
-    re.IGNORECASE | re.ASCII,
+PRIVATE_QUERY = re.compile(
+    r"@|\b(?:https?|file)://|\b(?:t\.me|telegram\.me)/|"
+    r"(?<!\d)\d{1,3}(?:\.\d{1,3}){3}(?!\d)|"
+    r"\b\d{9,}\b|\+\d[\d .()-]{8,}\d|"
+    r"\b\d{1,3}[ -]*(?:\(\d{2,4}\)|[ -]\d{2,4})[ -]*\d{3,4}[ -]\d{2,4}[ -]\d{2,4}\b|"
+    r"\b(?:sk-|ghp_|github_pat_|xox[baprs]-|AKIA)[a-z0-9_-]{8,}|"
+    r"\b(?:password|passwd|пароль|secret|api[_ -]?key|token)\s*[:=]\s*\S|"
+    r"[\x00-\x1f\x7f]",
+    re.IGNORECASE,
 )
-
-
-def versioned_name_key(match):
-    name, version, variant = match.groups()
-    name = name.lower()
-    return ("gpt" if name == "chatgpt" else name, version, (variant or "").lower())
 
 
 def authored_text(message):
@@ -56,33 +56,23 @@ def model_query_key(query):
     return re.sub(r"[ _-]+", "-", query.translate(DASHES).casefold())
 
 
-def query_from_messages(query, messages):
-    """Send exactly the author's words, even when the model changes whitespace or case."""
+def normalize_query(query):
     if not isinstance(query, str):
-        return None
+        return ""
     query = " ".join(query.split())
-    if not 0 < len(query) <= MAX_QUERY:
-        return None
-    query = query.translate(DASHES)
-    normalized = [(message, message.translate(DASHES)) for message in messages]
-    requested = {versioned_name_key(match) for match in VERSIONED_NAME.finditer(query)}
-    boundary = r"(?!\w|\.\d|-\w)" if requested else r"(?!\w)"
-    pattern = re.compile(r"(?<!\w)" + re.escape(query) + boundary, re.IGNORECASE)
-    for message, normalized_message in normalized:
-        match = pattern.search(normalized_message)
-        if match:
-            return message[match.start():match.end()]
-    # Recover the complete shared versioned name, without transmitting added words
-    # or accepting a different version or variant.
-    if requested:
-        for message, normalized_message in normalized:
-            for match in VERSIONED_NAME.finditer(normalized_message):
-                if len(match[0]) <= MAX_QUERY and versioned_name_key(match) in requested:
-                    return message[match.start():match.end()]
-    return None
+    return query if len(query) <= MAX_QUERY else ""
+
+
+def contains_private_identifier(query, identifiers=()):
+    if PRIVATE_QUERY.search(query):
+        return True
+    return any(re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", query, re.IGNORECASE)
+               for value in identifiers if value)
 
 
 def result_url(href):
+    if not isinstance(href, str):
+        return ""
     try:
         url = urlsplit(href)
         if url.hostname in ("duckduckgo.com", HOST) and url.path == "/l/":
@@ -125,9 +115,9 @@ class Results(HTMLParser):
             self.current[self.field] = " ".join(text.split())[:700]
 
 
-def fetch(query):
+def fetch(query, *, timeout=8):
     endpoint = "/lite/?" + urlencode({"q": query})
-    connection = HTTPSConnection(HOST, timeout=8)
+    connection = HTTPSConnection(HOST, timeout=timeout)
     try:
         connection.request("GET", endpoint, headers={"User-Agent": "Telegram-MCP-preset/1.0"})
         with connection.getresponse() as response:
@@ -144,12 +134,47 @@ def fetch(query):
         connection.close()
 
 
-def search(query):
+def fetch_firecrawl(query):
+    connection = HTTPSConnection(FIRECRAWL_HOST, timeout=5)
+    try:
+        payload = json.dumps({"query": query, "limit": MAX_RESULTS, "sources": [{"type": "web"}]})
+        connection.request("POST", "/v2/search", payload, {"Content-Type": "application/json"})
+        with connection.getresponse() as response:
+            if response.status != 200:
+                return [], f"Поиск временно недоступен (HTTP {response.status})."
+            data = json.loads(response.read(262_144))
+        rows = data["data"]["web"]
+        if data.get("success") is not True or not isinstance(rows, list):
+            return [], "Поисковик вернул неожиданный ответ."
+        results = []
+        for row in rows[:MAX_RESULTS]:
+            url = result_url(row.get("url")) if isinstance(row, dict) else ""
+            if url:
+                results.append({"url": url, "title": " ".join(str(row.get("title") or "").split())[:700],
+                                "snippet": " ".join(str(row.get("description") or "").split())[:700]})
+        return (results, "") if results else ([], "Поиск не вернул доступных результатов.")
+    except (OSError, HTTPException, KeyError, TypeError, ValueError):
+        return [], "Поиск временно недоступен."
+    finally:
+        connection.close()
+
+
+def fetch_sources(query, fallback):
+    results, error = fetch(query, timeout=4 if fallback else 8)
+    if not error or not fallback:
+        return results, error
+    results, fallback_error = fetch_firecrawl(query)
+    return (results, "") if not fallback_error else ([], f"DuckDuckGo: {error} Firecrawl: {fallback_error}")
+
+
+def search(query, *, fallback=False):
     if not 0 < len(query) <= MAX_QUERY:
         return [], "Укажите тему после /web, до 400 символов."
+    if contains_private_identifier(query):
+        return [], "Запрос содержит идентификатор или приватные данные."
     try:
         process = subprocess.run(
-            [sys.executable, "-I", __file__], input=query, encoding="utf-8",
+            [sys.executable, "-I", __file__, "firecrawl" if fallback else ""], input=query, encoding="utf-8",
             capture_output=True, timeout=10, check=True,
         )
         return tuple(json.loads(process.stdout))
@@ -158,4 +183,5 @@ def search(query):
 
 
 if __name__ == "__main__":
-    print(json.dumps(fetch(sys.stdin.read(MAX_QUERY + 1)), ensure_ascii=False))
+    query = sys.stdin.read(MAX_QUERY + 1)
+    print(json.dumps(fetch_sources(query, fallback=sys.argv[1:] == ["firecrawl"]), ensure_ascii=False))

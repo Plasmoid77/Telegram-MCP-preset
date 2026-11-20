@@ -114,7 +114,7 @@ class Private(Base):
         self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
         self.assertEqual(self.cur.chats[OWNER], 10)
 
-    def test_only_owner_dms_enable_web_research(self):
+    def test_only_owner_dms_launch_the_direct_web_command(self):
         self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
         with mock.patch.object(D, "run_agent") as run:
             self.d.run_private(OWNER, [msg(10, 1), msg(11, 1, text="/web release schedule"), msg(12, 1)])
@@ -124,17 +124,15 @@ class Private(Base):
         calls = run.call_args_list
         self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP, OWNER])
         self.assertEqual([call.kwargs for call in calls], [
-            {"web_messages": ("hi",)}, {"web_query": "release schedule"},
-            {"web_messages": ("hi",)}, {}, {}, {},
+            {}, {"web_query": "release schedule"}, {}, {}, {}, {},
         ])
 
-    def test_natural_search_comparison_keeps_the_full_request_for_the_agent(self):
+    def test_contextual_question_runs_the_agent_without_a_prefilled_search(self):
         self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
-        text = "Поищи в интернете, чем твоя модель отличается от GPT-6.2 Sol."
         with mock.patch.object(D, "run_agent") as run:
-            self.d.run_private(OWNER, [msg(10, 1, text=text)])
+            self.d.run_private(OWNER, [msg(10, 1, text="А когда заканчивается её поддержка?")])
         run.assert_called_once()
-        self.assertEqual(run.call_args.kwargs, {"web_messages": (text,)})
+        self.assertEqual(run.call_args.kwargs, {})
 
     def test_feed_max_does_not_hide_an_earlier_lost_message(self):
         self.cur.chats[OWNER] = 100

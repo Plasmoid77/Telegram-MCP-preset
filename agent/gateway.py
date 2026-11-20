@@ -23,6 +23,8 @@ READ_ONLY_TELEGRAM = {
     "resolve_username", "list_topics", "list_folders", "get_folder", "get_message_link",
 }
 CHAT_STATUS_TOOLS = {"mark_as_read", "send_typing"}
+WEB_CONTEXT_READS = {"get_history", "get_messages_after", "get_message_context",
+                     "get_messages", "list_messages", "search_messages"}
 OWNER_DIRECT_TOOLS = GUEST_TOOLS | {
     "list_chats", "search_messages", "search_global", "resolve_username",
     "list_topics", "list_folders", "get_folder", "create_folder", "delete_folder",
@@ -56,7 +58,8 @@ FIND_TOOL = tool("find_telegram_tool", "Find additional Telegram tools and their
 CALL_TOOL = tool("call_telegram_tool", "Call an additional Telegram tool using its exact input schema.",
                  {"name": {"type": "string"}, "arguments": {"type": "object"}})
 WEB_SEARCH = tool("search_web", "Search the public web for current facts or sources. Use a short "
-                  "public phrase copied from the owner's current messages. For the configured public "
+                  "query about public information, using conversation context when needed. "
+                  "For the configured public "
                   "model, use @model if the run instructions say it is available. "
                   "After searching, reply with links using send_message in this chat.",
                   {"query": {"type": "string", "maxLength": web_research.MAX_QUERY}})
@@ -103,7 +106,7 @@ def text_result(text, error=False):
 
 
 class TelegramScope:
-    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False, web_messages=()):
+    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False):
         self.upstream = upstream
         self.tier = tier
         self.chat = int(cid)
@@ -111,8 +114,12 @@ class TelegramScope:
         self.writes_attempted = False
         self.web_blocked = False
         self.web_calls = 0
-        self.web_messages = web_messages if not research and tier == "owner" and str(cid) == cfg.get("OWNER_ID") else ()
-        self.web_model = web_research.public_model(cfg) if self.web_messages else ""
+        self.allow_web = (not research and tier == "owner" and str(cid) == cfg.get("OWNER_ID")
+                          and cfg.get("WEB_SEARCH") == "duckduckgo")
+        self.web_model = web_research.public_model(cfg) if self.allow_web else ""
+        self.web_fallback = cfg.get("WEB_SEARCH_FALLBACK") == "firecrawl"
+        self.web_identifiers = (cfg.get("OWNER_USERNAME", "").strip().lstrip("@"),
+                                cfg.get("SELF_ID", ""), cfg.get("OWNER_ID", ""))
         self.web_results = {}
         self.self_id = cfg.get("SELF_ID", "")
         target = normalize(cfg.get("NOTIFY_CHAT") or "me")
@@ -141,7 +148,7 @@ class TelegramScope:
             self.catalog[READ_RESULT["name"]] = READ_RESULT
         if tier == "owner" and not research:
             self.catalog.update({item["name"]: item for item in (MEMORY_READ, MEMORY_WRITE, FIND_TOOL, CALL_TOOL)})
-        if self.web_messages:
+        if self.allow_web:
             self.catalog[WEB_SEARCH["name"]] = WEB_SEARCH
 
     def no_effects_attempted(self, *, allow_search=False):
@@ -154,16 +161,20 @@ class TelegramScope:
 
     def search_web(self, args):
         if self.web_blocked:
-            return text_result("Запрос не отправлен: запускай поиск до отправки сообщения или изменения данных.", True)
-        raw_query = args.get("query")
-        query = web_research.query_from_messages(raw_query, self.web_messages)
-        if self.web_model and isinstance(raw_query, str):
-            key = web_research.model_query_key(" ".join(raw_query.split()))
-            if key in ("@model", web_research.model_query_key(self.web_model)):
-                query = self.web_model
-        if query is None:
-            return text_result("Запрос не отправлен: скопируй короткую публичную фразу целиком из "
-                               "новых сообщений владельца без перевода или добавления слов.", True)
+            return text_result("Запрос не отправлен: используй поиск до отправки сообщения, изменения "
+                               "данных или чтения приватного контекста вне текущей лички.", True)
+        query = web_research.normalize_query(args.get("query"))
+        if not query:
+            return text_result(f"Укажи поисковый запрос длиной до {web_research.MAX_QUERY} символов.", True)
+        if query == "@model":
+            if not self.web_model:
+                return text_result("Публичное имя текущей модели не настроено.", True)
+            query = self.web_model
+        elif self.web_model and web_research.model_query_key(query) == web_research.model_query_key(self.web_model):
+            query = self.web_model
+        if web_research.contains_private_identifier(query, self.web_identifiers):
+            return text_result("Запрос содержит идентификатор или приватные данные. "
+                               "Переформулируй запрос без них.", True)
         key = query.casefold()
         if key in self.web_results:
             return self.web_results[key]
@@ -172,7 +183,7 @@ class TelegramScope:
         self.research = True
         self.last_result = None
         self.web_calls += 1
-        results, error = web_research.search(query)
+        results, error = web_research.search(query, fallback=self.web_fallback)
         if error:
             return text_result(error, True)
         result = text_result(json.dumps(results, ensure_ascii=False))
@@ -214,6 +225,7 @@ class TelegramScope:
                     return text_result("Unknown result or invalid page offset.", True)
                 return self.page(offset)
             if name == MEMORY_READ["name"]:
+                self.web_blocked = True
                 try:
                     with self.memory.open(encoding="utf-8") as stream:
                         return text_result(stream.read(MAX_MEMORY))
@@ -258,6 +270,9 @@ class TelegramScope:
                 self.writes_attempted = True
                 if name not in CHAT_STATUS_TOOLS:
                     self.web_blocked = True
+            elif (self.allow_web and (name not in WEB_CONTEXT_READS
+                  or normalize(args.get("chat_id")) != str(self.chat) or args.get("account") is not None)):
+                self.web_blocked = True
             return self.paginate(self.upstream.tool_result(name, args, timeout=180))
 
     def paginate(self, result):

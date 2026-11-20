@@ -29,7 +29,8 @@ the auto-responder, server configuration, local speech recognition, systemd unit
 - **Local transcription.** The preset transcribes voice messages and video notes on the same
   machine using onnx-asr. The default model is full-precision GigaAM-v3 E2E RNN-T.
 - **Web research.** In the owner's DMs, the assistant can look up current facts or search on request
-  and summarize the results with sources. See [how to enable web search (Russian)](docs/HARNESSES.md#веб-поиск-в-личке-владельца).
+  using queries it formulates from the conversation, and summarize the results with sources. See
+  [how to enable web search (Russian)](docs/HARNESSES.md#веб-поиск-в-личке-владельца).
 - **Upstream updates.** Enable `telegram-mcp-update.timer` to get weekly release notifications.
   Apply updates manually with `update_mcp.py apply`, which checks the result and rolls back on failure.
 
