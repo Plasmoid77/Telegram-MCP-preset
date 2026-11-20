@@ -48,6 +48,13 @@ def custom_command(cfg):
     return command
 
 
+def opencode_timeouts(cfg):
+    return {
+        "headerTimeout": int(cfg.get("OPENCODE_HEADER_TIMEOUT_MS", "20000")),
+        "chunkTimeout": int(cfg.get("OPENCODE_CHUNK_TIMEOUT_MS", "45000")),
+    }
+
+
 def preflight(cfg):
     name = harness_name(cfg)
     if name != "claude":
@@ -56,6 +63,8 @@ def preflight(cfg):
                 raise ValueError(f"Set {field} to a positive Telegram user ID")
         if not cfg.get("MODEL"):
             raise ValueError("Set MODEL for the configured harness")
+        if name == "opencode" and min(opencode_timeouts(cfg).values()) <= 0:
+            raise ValueError("OpenCode provider timeouts must be positive")
         steps_and_timeout(cfg, "guest")
         steps_and_timeout(cfg, "owner")
         binary = custom_command(cfg)[0] if name == "command" else executable(cfg, name)
@@ -63,7 +72,7 @@ def preflight(cfg):
             raise ValueError(f"Executable for HARNESS={name} was not found")
 
 
-def opencode_config(url, names, steps):
+def opencode_config(url, names, steps, cfg):
     tool_names = [f"telegram_{name}" for name in names]
     permissions = [{"action": "*", "resource": "*", "effect": "deny"}]
     permissions += [{"action": name, "resource": "*", "effect": "allow"} for name in tool_names]
@@ -73,6 +82,7 @@ def opencode_config(url, names, steps):
     policies += [{"action": "tool.use", "resource": f"{name}:*", "effect": "allow"}
                  for name in tool_names]
     return {
+        "providers": {cfg["MODEL"].split("/", 1)[0]: {"settings": opencode_timeouts(cfg)}},
         "permissions": permissions,
         "policies": policies,
         "mcp": {"servers": {"telegram": {
@@ -99,7 +109,7 @@ def launch_args(cfg, harness, directory, url, names, steps, env):
         return cmd + ["-"]
     if harness == "opencode":
         config = directory / "opencode.json"
-        config.write_text(json.dumps(opencode_config(url, names, steps)), encoding="utf-8")
+        config.write_text(json.dumps(opencode_config(url, names, steps, cfg)), encoding="utf-8")
         # Keep the provider database (saved OpenCode login), but ignore personal config and plugins.
         env.pop("OPENCODE_CONFIG_CONTENT", None)
         env.pop("OPENCODE_CONFIG_DIR", None)

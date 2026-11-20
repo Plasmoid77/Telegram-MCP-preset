@@ -28,6 +28,8 @@ the auto-responder, server configuration, local speech recognition, systemd unit
   `prompt.md` to change its language or style.
 - **Local transcription.** The preset transcribes voice messages and video notes on the same
   machine using onnx-asr. The default model is full-precision GigaAM-v3 E2E RNN-T.
+- **Web research.** The owner can request a search from a DM with `/web` and get a summary
+  with source links. See [how to enable web search (Russian)](docs/HARNESSES.md#веб-поиск-в-личке-владельца).
 - **Upstream updates.** Enable `telegram-mcp-update.timer` to get weekly release notifications.
   Apply updates manually with `update_mcp.py apply`, which checks the result and rolls back on failure.
 

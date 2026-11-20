@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 from gateway import Gateway, TelegramScope, TEXT_PAGE, text_result
 from harnesses import machine_success, opencode_config
+from web_research import Results, requested_query
 
 
 class Upstream:
@@ -114,6 +115,41 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(machine_success("codex", 0, ['{"type":"turn.failed"}']))
         self.assertTrue(machine_success("opencode", 0, ['{"type":"step_finish"}']))
         self.assertFalse(machine_success("opencode", 0, ['{"type":"step_finish"}', '{"type":"error"}']))
-        config = opencode_config("http://127.0.0.1:8765/test", ["get_history"], 5)
+        config = opencode_config("http://127.0.0.1:8765/test", ["get_history"], 5,
+                                 {"MODEL": "opencode-go/qwen", "OPENCODE_HEADER_TIMEOUT_MS": "15000"})
         self.assertEqual([(rule["action"], rule["effect"]) for rule in config["permissions"]],
                          [("*", "deny"), ("telegram_get_history", "allow")])
+        self.assertEqual(config["providers"]["opencode-go"]["settings"],
+                         {"headerTimeout": 15000, "chunkTimeout": 45000})
+
+    def test_web_research_can_only_reply_to_the_requesting_chat(self):
+        scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "NOTIFY_CHAT": "me"},
+                              self.memory, research=True)
+        self.assertEqual(set(scope.catalog), {"send_message"})
+        for name, args in (
+            ("send_message", {"chat_id": 100}), ("send_message", {"chat_id": "me"}),
+            ("send_message", {"chat_id": 101, "account": "other"}),
+            ("send_message", {"chat_id": 101, "send_as": "other"}),
+            ("get_history", {"chat_id": 101}), ("memory_read", {}),
+            ("call_telegram_tool", {"name": "search_contacts", "arguments": {}}),
+        ):
+            self.assertTrue(scope.call(name, args)["isError"])
+        self.assertEqual(self.upstream.calls, [])
+        self.assertFalse(scope.call("send_message", {"chat_id": "101", "message": "Answer"})["isError"])
+        self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "Duplicate"})["isError"])
+        self.assertEqual(self.upstream.calls, [("send_message", {"chat_id": 101, "message": "Answer"})])
+
+    def test_web_search_intent_and_source_links(self):
+        self.assertIsNone(requested_query({"text": "В цитате есть /web конфиденциальная тема"}))
+        self.assertIsNone(requested_query({"text": "/website"}))
+        self.assertIsNone(requested_query({"text": "/web forwarded", "forwarded": True}))
+        self.assertIsNone(requested_query({"text": "/web quoted", "formatting": [{"type": "blockquote"}]}))
+        self.assertEqual(requested_query({"text": "/web Python\n  версии"}), "Python версии")
+        self.assertEqual(requested_query({"text": "Поищи в интернете: Python версии"}), "Python версии")
+        parser = Results()
+        parser.feed("""<a class='result-link' href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org">
+                    Python &amp; docs</a><td class='result-snippet'>Stable <b>releases</b></td>
+                    <a class='result-link' href="javascript:alert(1)">Drop this</a>
+                    <td class="result-snippet">Also drop this</td>""")
+        self.assertEqual(parser.results, [{"url": "https://python.org", "title": "Python & docs",
+                                           "snippet": "Stable releases"}])

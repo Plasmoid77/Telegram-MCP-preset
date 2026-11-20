@@ -83,6 +83,16 @@ class Private(Base):
         self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
         self.assertEqual(self.cur.chats[OWNER], 10)
 
+    def test_only_explicit_owner_dms_enable_web_research(self):
+        self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
+        with mock.patch.object(D, "run_agent") as run:
+            self.d.run_private(OWNER, [msg(10, 1), msg(11, 1, text="/web release schedule"), msg(12, 1)])
+            self.d.run_private(GUEST, [msg(13, 1, text="/web release schedule", sender=GUEST)])
+            self.d.run_group(GROUP, [msg(14, 1, text="/web release schedule")])
+        calls = run.call_args_list
+        self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP])
+        self.assertEqual([call.kwargs for call in calls], [{}, {"web_query": "release schedule"}, {}, {}, {}])
+
     def test_feed_max_does_not_hide_an_earlier_lost_message(self):
         self.cur.chats[OWNER] = 100
         self.chat(OWNER, "private", msg(101, 300), msg(102, 10))

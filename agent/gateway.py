@@ -91,10 +91,12 @@ def text_result(text, error=False):
 
 
 class TelegramScope:
-    def __init__(self, upstream, cid, tier, cfg, memory):
+    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False):
         self.upstream = upstream
         self.tier = tier
         self.chat = int(cid)
+        self.research = research
+        self.research_replied = False
         self.self_id = cfg.get("SELF_ID", "")
         target = normalize(cfg.get("NOTIFY_CHAT") or "me")
         own_id = normalize(self.self_id)
@@ -108,12 +110,19 @@ class TelegramScope:
         self.last_result = None
         self.lock = threading.Lock()
         self.closed = threading.Event()
-        direct = OWNER_DIRECT_TOOLS if tier == "owner" else GUEST_TOOLS
+        direct = {"send_message"} if research else (
+            OWNER_DIRECT_TOOLS if tier == "owner" else GUEST_TOOLS)
         self.upstream_tools = {item["name"]: item for item in upstream.catalog()
                                if item["name"] not in BLOCKED_TOOLS}
         self.catalog = {name: item for name, item in self.upstream_tools.items() if name in direct}
-        self.catalog[READ_RESULT["name"]] = READ_RESULT
-        if tier == "owner":
+        if research and "send_message" in self.catalog:
+            self.catalog["send_message"] = tool(
+                "send_message", "Send one plain text answer to the owner in the requesting chat.",
+                {"chat_id": {"type": "integer"}, "message": {"type": "string", "maxLength": 4096}},
+            )
+        elif not research:
+            self.catalog[READ_RESULT["name"]] = READ_RESULT
+        if tier == "owner" and not research:
             self.catalog.update({item["name"]: item for item in (MEMORY_READ, MEMORY_WRITE, FIND_TOOL, CALL_TOOL)})
 
     def page(self, offset):
@@ -166,7 +175,16 @@ class TelegramScope:
                 name, args = args.get("name"), args.get("arguments")
                 if not isinstance(name, str) or name not in self.upstream_tools or not isinstance(args, dict):
                     return text_result("Unknown Telegram tool or invalid arguments.", True)
-            if self.tier == "guest":
+            if self.research:
+                args = guest_arguments(name, args, self.chat, {})
+                message = args.get("message") if args is not None else None
+                if (self.research_replied or not isinstance(message, str) or not 0 < len(message) <= 4096
+                        or args.keys() != {"chat_id", "message"}):
+                    return text_result("Send one plain text answer in the requesting chat.", True)
+                result = self.upstream.tool_result(name, args, timeout=20)
+                self.research_replied = not result.get("isError")
+                return result
+            elif self.tier == "guest":
                 args = guest_arguments(name, args, self.chat, self.notify)
                 if args is None:
                     return text_result("Blocked by guard: this operation is outside the current chat.", True)
