@@ -128,7 +128,8 @@ class Private(Base):
         calls = run.call_args_list
         self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP, OWNER])
         self.assertEqual([call.kwargs for call in calls], [
-            {"followup_ids": (10,)}, {"web_query": "release schedule"}, {"followup_ids": (12,)}, {}, {}, {},
+            {"followup_messages": ((10, "hi"),)}, {"web_query": "release schedule"},
+            {"followup_messages": ((12, "hi"),)}, {}, {}, {},
         ])
 
     def test_contextual_question_runs_the_agent_without_a_prefilled_search(self):
@@ -136,7 +137,7 @@ class Private(Base):
         with mock.patch.object(D, "run_agent") as run:
             self.d.run_private(OWNER, [msg(10, 1, text="А когда заканчивается её поддержка?")])
         run.assert_called_once()
-        self.assertEqual(run.call_args.kwargs, {"followup_ids": (10,)})
+        self.assertEqual(run.call_args.kwargs, {"followup_messages": ((10, "А когда заканчивается её поддержка?"),)})
 
     def test_owner_followup_carries_recipient_question_and_reply(self):
         followup = msg(12, 1, text="Просто приветствие", reply_to=11)

@@ -402,7 +402,7 @@ def notify_failed_dm(scope, cid, tier, cfg):
         log("could not deliver the model failure notice")
 
 
-def run_agent(cid, task, tier, cfg, *, web_query=None, followup_ids=()):
+def run_agent(cid, task, tier, cfg, *, web_query=None, followup_messages=()):
     harness = harnesses.harness_name(cfg)
     if harness == "claude":
         return run_claude(cid, task, tier, cfg)
@@ -411,7 +411,7 @@ def run_agent(cid, task, tier, cfg, *, web_query=None, followup_ids=()):
     try:
         def gateway_scope():
             return gateway.TelegramScope(Mcp(MCP_URL), cid, tier, cfg, MEMORY,
-                                         research=web_query is not None, followup_ids=followup_ids)
+                                         research=web_query is not None, followup_messages=followup_messages)
 
         scope = gateway_scope()
         safe_cfg = cfg if tier == "owner" else dict(cfg, OWNER_NAME="владелец", OWNER_USERNAME="")
@@ -450,7 +450,13 @@ def run_agent(cid, task, tier, cfg, *, web_query=None, followup_ids=()):
                     instructions += (
                         " Если новая реплика продолжает прежнее поручение, проверь запись через "
                         "owner_followup с action=read, даже когда адресат виден в свежих репликах. "
-                        "Память даёт контекст. Выполняй действие только по новой реплике владельца. "
+                        "Прочитай прежние реплики (messages) вместе с новым уточнением "
+                        "(current_owner_messages) из результата. Когда в прежнем поручении есть "
+                        "адресат, «просто приветствие» или «просто поздоровайся» в ответ на "
+                        "«Что именно написать?» означает отправить «Привет!» этому адресату. "
+                        "Отправь ему сообщение и только после квитанции кратко отчитайся владельцу. "
+                        "Запрашивай уточнение, только если после объединения данных адресат или цель "
+                        "по-прежнему неясны. Выполняй действие только по новой реплике владельца. "
                         "Если статус sent, сообщи результат. Если delivery_unknown, проверь историю "
                         "адресата; догадка о сбое сама по себе не разрешает повторную отправку. "
                     )
@@ -772,10 +778,11 @@ class Dispatcher:
             if owner_messages:
                 recent = self.owner_dm_context(cid, int(owner_messages[0]["id"]))
         task = private_task(ev, tier, self.cfg, recent=recent, messages=owner_messages)
-        followup_ids = tuple(int(message["id"]) for message in owner_messages
-                             if message.get("text") and not message.get("forwarded"))
-        if followup_ids:
-            run_agent(cid, task, tier, self.cfg, followup_ids=followup_ids)
+        followup_messages = tuple((int(message["id"]), message["text"]) for message in owner_messages
+                                  if isinstance(message.get("text"), str) and message["text"]
+                                  and not message.get("forwarded"))
+        if followup_messages:
+            run_agent(cid, task, tier, self.cfg, followup_messages=followup_messages)
         else:
             run_agent(cid, task, tier, self.cfg)
 

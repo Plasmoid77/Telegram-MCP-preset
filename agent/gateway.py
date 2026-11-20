@@ -111,7 +111,7 @@ def text_result(text, error=False):
 
 
 class TelegramScope:
-    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False, followup_ids=()):
+    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False, followup_messages=()):
         self.upstream = upstream
         self.tier = tier
         self.chat = int(cid)
@@ -136,7 +136,10 @@ class TelegramScope:
         else:
             self.notify = {target: int(target) if target.lstrip("-").isdecimal() else target}
         self.memory = memory
-        self.followup_ids = followups.message_ids(followup_ids)
+        self.followup_ids = followups.message_ids(mid for mid, _ in followup_messages)
+        self.followup_current = [{"id": mid, "text": text[:followups.MAX_TEXT],
+                                  "truncated": len(text) > followups.MAX_TEXT}
+                                 for mid, text in followup_messages if mid in self.followup_ids]
         self.followup_store = None
         self.followup_loaded = False
         self.followup_restored = False
@@ -185,7 +188,8 @@ class TelegramScope:
                         raise
                     messages = []
                 self.followup_restored = True
-                fields = {"status": record["status"], "messages": messages}
+                fields = {"status": record["status"], "messages": messages,
+                          "current_owner_messages": self.followup_current}
                 if "delivered_id" in record:
                     fields["delivered_id"] = record["delivered_id"]
                 return text_result(json.dumps(fields, ensure_ascii=False))

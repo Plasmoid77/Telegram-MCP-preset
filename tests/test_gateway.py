@@ -52,7 +52,8 @@ class GatewayTests(unittest.TestCase):
         state = self.memory.parent / "state"
         state.mkdir(exist_ok=True)
         cfg = dict(OWNER_ID="101", SELF_ID="5", WEB_SEARCH="duckduckgo", **options)
-        return TelegramScope(self.upstream, 101, "owner", cfg, self.memory, followup_ids=(message_id,))
+        return TelegramScope(self.upstream, 101, "owner", cfg, self.memory,
+                             followup_messages=((message_id, "Просто приветствие"),))
 
     def test_followup_restores_old_request_and_records_one_confirmed_delivery(self):
         first = self.followup_scope(40)
@@ -80,6 +81,8 @@ class GatewayTests(unittest.TestCase):
         fields = json.loads(restored["content"][0]["text"])
         self.assertEqual([(row["author"], row["text"]) for row in fields["messages"]],
                          [("owner", message["text"]), ("bot", question["text"])])
+        self.assertEqual(fields["current_owner_messages"],
+                         [{"id": 200, "text": "Просто приветствие", "truncated": False}])
         self.assertTrue(second.call("search_web", {"query": "Python docs"})["isError"])
 
         def deliver(name, args, timeout):
@@ -131,7 +134,8 @@ class GatewayTests(unittest.TestCase):
     def test_followup_tool_is_scoped_to_owner_private_chat(self):
         cfg = {"OWNER_ID": "101", "SELF_ID": "5"}
         for cid, tier, research in ((-100, "owner", False), (101, "guest", False), (101, "owner", True)):
-            scope = TelegramScope(self.upstream, cid, tier, cfg, self.memory, research=research, followup_ids=(40,))
+            scope = TelegramScope(self.upstream, cid, tier, cfg, self.memory, research=research,
+                                  followup_messages=((40, "Напиши контактy"),))
             self.assertNotIn("owner_followup", scope.catalog)
 
     def test_guest_scope_checks_required_arguments_and_notification_direction(self):
