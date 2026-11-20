@@ -6,6 +6,7 @@ import threading
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import followups
 import web_research
 
 GUEST_CHAT_TOOLS = {
@@ -52,6 +53,10 @@ READ_RESULT = tool("read_result", "Read the next page of a long Telegram tool re
 MEMORY_READ = tool("memory_read", "Read the owner's persistent instructions.", {})
 MEMORY_WRITE = tool("memory_write", "Replace the owner's persistent instructions with this text.",
                     {"text": {"type": "string", "maxLength": MAX_MEMORY}})
+FOLLOWUP = tool("owner_followup", "Read, remember, or clear the owner's pending request to send a "
+                "message in another chat. Remember before asking for clarification. Read when the latest message "
+                "continues an earlier task. Clear when the owner cancels or the task is finished.",
+                {"action": {"type": "string", "enum": ["read", "remember", "clear"]}})
 
 FIND_TOOL = tool("find_telegram_tool", "Find additional Telegram tools and their exact input schemas.",
                  {"query": {"type": "string", "description": "Part of a tool name, such as 'folder'."}})
@@ -106,7 +111,7 @@ def text_result(text, error=False):
 
 
 class TelegramScope:
-    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False):
+    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False, followup_ids=()):
         self.upstream = upstream
         self.tier = tier
         self.chat = int(cid)
@@ -131,6 +136,16 @@ class TelegramScope:
         else:
             self.notify = {target: int(target) if target.lstrip("-").isdecimal() else target}
         self.memory = memory
+        self.followup_ids = followups.message_ids(followup_ids)
+        self.followup_store = None
+        self.followup_loaded = False
+        self.followup_restored = False
+        self.followup_delivery_attempted = False
+        self.followup_waiting_for_question = False
+        if (self.followup_ids and not research and tier == "owner"
+                and str(cid) == cfg.get("OWNER_ID") and self.self_id):
+            self.followup_store = followups.Followups(
+                memory.parent / "state" / "owner-followup.json", cid, self.self_id)
         self.last_result = None
         self.lock = threading.Lock()
         self.closed = threading.Event()
@@ -150,6 +165,86 @@ class TelegramScope:
             self.catalog.update({item["name"]: item for item in (MEMORY_READ, MEMORY_WRITE, FIND_TOOL, CALL_TOOL)})
         if self.allow_web:
             self.catalog[WEB_SEARCH["name"]] = WEB_SEARCH
+        if self.followup_store is not None:
+            self.catalog[FOLLOWUP["name"]] = FOLLOWUP
+
+    def owner_followup(self, action):
+        if action not in ("read", "remember", "clear"):
+            return text_result("Choose read, remember, or clear.", True)
+        try:
+            record = self.followup_store.read()
+            if action == "read":
+                if record is None:
+                    return text_result("Нет сохранённого поручения.")
+                self.web_blocked = True
+                self.followup_loaded = True
+                try:
+                    messages = followups.restore(self.upstream, self.chat, self.self_id, record)
+                except (OSError, RuntimeError, ValueError, AttributeError, KeyError):
+                    if record["status"] == "pending":
+                        raise
+                    messages = []
+                self.followup_restored = True
+                fields = {"status": record["status"], "messages": messages}
+                if "delivered_id" in record:
+                    fields["delivered_id"] = record["delivered_id"]
+                return text_result(json.dumps(fields, ensure_ascii=False))
+            self.web_blocked = True
+            if action == "clear":
+                if self.followup_delivery_attempted:
+                    return text_result("Попытка отправки сохранена для следующего запуска.")
+                self.writes_attempted = True
+                self.followup_store.clear()
+                self.followup_loaded = self.followup_restored = False
+                self.followup_waiting_for_question = False
+                return text_result("Сохранённое поручение закрыто.")
+            if record and (record["status"] == "delivery_unknown"
+                           or (record["status"] == "pending" and not self.followup_restored)):
+                return text_result("Сначала проверь открытое поручение.", True)
+            prior_ids = record["message_ids"] if record and record["status"] == "pending" else []
+            self.writes_attempted = True
+            self.followup_store.write((*prior_ids, *self.followup_ids),
+                                      question_id=record.get("question_id") if prior_ids else None)
+            self.followup_waiting_for_question = True
+            return text_result("Ссылки на поручение сохранены.")
+        except (OSError, RuntimeError, ValueError, TypeError, AttributeError, KeyError):
+            return text_result("Не удалось восстановить или обновить поручение. Уточни у владельца.", True)
+
+    def deliver_followup(self, name, args):
+        if name != "send_message":
+            return text_result("Для выполнения сохранённого поручения используй send_message.", True)
+        try:
+            record = self.followup_store.read()
+            if (not self.followup_restored or not record or record["status"] != "pending"
+                    or self.followup_delivery_attempted):
+                return text_result("Повторная отправка по этому поручению остановлена. Проверь доставку.", True)
+            self.followup_store.write(record["message_ids"], "delivery_unknown",
+                                      question_id=record.get("question_id"))
+        except (OSError, ValueError):
+            return text_result("Не удалось зафиксировать попытку отправки.", True)
+        self.followup_delivery_attempted = True
+        result = self.upstream.tool_result(name, args, timeout=180)
+        receipt = followups.delivery_id(result)
+        if receipt:
+            try:
+                self.followup_store.write(record["message_ids"], "sent", delivered_id=receipt,
+                                          question_id=record.get("question_id"))
+            except OSError:
+                # Leave the durable attempt in place even if saving the receipt fails.
+                pass
+        return self.paginate(result)
+
+    def remember_question(self, result):
+        mid = followups.delivery_id(result)
+        if not mid:
+            return
+        self.followup_waiting_for_question = False
+        try:
+            record = self.followup_store.read()
+            if record and record["status"] == "pending":
+                self.followup_store.write(record["message_ids"], question_id=mid)
+        except (OSError, ValueError):
+            pass  # The owner request is still recorded even if the question ID cannot be saved.
 
     def no_effects_attempted(self, *, allow_search=False):
         if not self.lock.acquire(blocking=False):
@@ -218,6 +313,8 @@ class TelegramScope:
                 if name == "send_message":
                     return self.reply_to_research(args)
                 return text_result("After web research, only a reply in the requesting chat is available.", True)
+            if name == FOLLOWUP["name"]:
+                return self.owner_followup(args.get("action"))
             if name == READ_RESULT["name"]:
                 offset = args.get("offset")
                 if (not self.last_result or args.get("result_id") != self.last_result[0]
@@ -273,7 +370,17 @@ class TelegramScope:
             elif (self.allow_web and (name not in WEB_CONTEXT_READS
                   or normalize(args.get("chat_id")) != str(self.chat) or args.get("account") is not None)):
                 self.web_blocked = True
-            return self.paginate(self.upstream.tool_result(name, args, timeout=180))
+            owner_message = (name == "send_message" and normalize(args.get("chat_id")) == str(self.chat)
+                             and args.get("account") is None)
+            if (self.followup_loaded and not owner_message and name not in READ_ONLY_TELEGRAM
+                    and name not in CHAT_STATUS_TOOLS):
+                if args.get("account") is None:
+                    return self.deliver_followup(name, args)
+                return text_result("Сохранённое поручение привязано к текущему Telegram-аккаунту.", True)
+            result = self.upstream.tool_result(name, args, timeout=180)
+            if self.followup_waiting_for_question and owner_message:
+                self.remember_question(result)
+            return self.paginate(result)
 
     def paginate(self, result):
         content = result.get("content", [])

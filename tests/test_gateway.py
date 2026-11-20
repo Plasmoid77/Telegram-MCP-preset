@@ -48,6 +48,92 @@ class GatewayTests(unittest.TestCase):
     def scope(self, tier):
         return TelegramScope(self.upstream, 101, tier, {"SELF_ID": "5", "NOTIFY_CHAT": "me"}, self.memory)
 
+    def followup_scope(self, message_id, **options):
+        state = self.memory.parent / "state"
+        state.mkdir(exist_ok=True)
+        cfg = dict(OWNER_ID="101", SELF_ID="5", WEB_SEARCH="duckduckgo", **options)
+        return TelegramScope(self.upstream, 101, "owner", cfg, self.memory, followup_ids=(message_id,))
+
+    def test_followup_restores_old_request_and_records_one_confirmed_delivery(self):
+        first = self.followup_scope(40)
+        self.assertFalse(first.call("owner_followup", {"action": "remember"})["isError"])
+        path = first.followup_store.path
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved, {"identity": {"owner": "101", "account": "5"},
+                                 "message_ids": [40], "status": "pending"})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with patch.object(self.upstream, "tool_result",
+                          return_value=text_result("Message sent successfully. message_id=41")):
+            first.call("send_message", {"chat_id": 101, "message": "Что написать?"})
+        self.assertEqual(json.loads(path.read_text())["question_id"], 41)
+        message = {"id": 40, "sender_id": 101, "text": "Напиши @sample_recipient"}
+        question = {"id": 41, "sender_id": 5, "out": True, "text": "Что написать?"}
+
+        def lookup(name, args, timeout):
+            self.assertEqual((name, args["chat_id"], args["limit"], timeout), ("get_messages_after", 101, 1, 2))
+            return {"chat_id": 101, "messages": [{39: message, 40: question}[args["after_id"]]]}
+
+        second = self.followup_scope(200)
+        with patch.object(self.upstream, "call", side_effect=lookup, create=True) as call:
+            restored = second.call("owner_followup", {"action": "read"})
+            self.assertEqual(call.call_count, 2)
+        fields = json.loads(restored["content"][0]["text"])
+        self.assertEqual([(row["author"], row["text"]) for row in fields["messages"]],
+                         [("owner", message["text"]), ("bot", question["text"])])
+        self.assertTrue(second.call("search_web", {"query": "Python docs"})["isError"])
+
+        def deliver(name, args, timeout):
+            self.assertEqual(json.loads(path.read_text())["status"], "delivery_unknown")
+            return text_result("Message sent successfully. message_id=300")
+
+        args = {"chat_id": 202, "message": "Привет!"}
+        with patch.object(self.upstream, "tool_result", side_effect=deliver) as tool:
+            self.assertTrue(second.call("send_message", dict(args, account="other"))["isError"])
+            self.assertTrue(second.call("forward_message", {"to_chat_id": 202})["isError"])
+            self.assertFalse(second.call("send_message", args)["isError"])
+            second.call("owner_followup", {"action": "clear"})
+            self.assertTrue(second.call("send_message", args)["isError"])
+            tool.assert_called_once()
+        self.assertEqual(json.loads(path.read_text())["delivered_id"], 300)
+
+        third = self.followup_scope(201)
+        with patch.object(self.upstream, "call", side_effect=lookup, create=True):
+            synced = third.call("owner_followup", {"action": "read"})
+        self.assertEqual(json.loads(synced["content"][0]["text"])["status"], "sent")
+        self.assertTrue(third.call("send_message", args)["isError"])
+        self.assertFalse(third.call("owner_followup", {"action": "clear"})["isError"])
+        self.assertFalse(path.exists())
+
+    def test_followup_with_failed_lookup_or_ambiguous_delivery_does_not_resend(self):
+        first = self.followup_scope(40)
+        self.assertFalse(first.call("owner_followup", {"action": "remember"})["isError"])
+        args = {"chat_id": 202, "message": "Привет!"}
+        stale = self.followup_scope(100)
+        wrong = {"chat_id": 101, "messages": [{"id": 41, "sender_id": 101, "text": "Other message"}]}
+        with patch.object(self.upstream, "call", return_value=wrong, create=True):
+            self.assertTrue(stale.call("owner_followup", {"action": "read"})["isError"])
+        self.assertTrue(stale.call("send_message", args)["isError"])
+        self.assertEqual(self.upstream.calls, [])
+
+        valid = {"chat_id": 101, "messages": [{"id": 40, "sender_id": 101, "text": "Напиши контактy"}]}
+        with patch.object(self.upstream, "call", return_value=valid, create=True):
+            active = self.followup_scope(101)
+            self.assertFalse(active.call("owner_followup", {"action": "read"})["isError"])
+            with patch.object(self.upstream, "tool_result", side_effect=TimeoutError):
+                with self.assertRaises(TimeoutError):
+                    active.call("send_message", args)
+            retry = self.followup_scope(102)
+            restored = retry.call("owner_followup", {"action": "read"})
+            self.assertEqual(json.loads(restored["content"][0]["text"])["status"], "delivery_unknown")
+            self.assertTrue(retry.call("send_message", args)["isError"])
+        self.assertEqual(self.upstream.calls, [])
+
+    def test_followup_tool_is_scoped_to_owner_private_chat(self):
+        cfg = {"OWNER_ID": "101", "SELF_ID": "5"}
+        for cid, tier, research in ((-100, "owner", False), (101, "guest", False), (101, "owner", True)):
+            scope = TelegramScope(self.upstream, cid, tier, cfg, self.memory, research=research, followup_ids=(40,))
+            self.assertNotIn("owner_followup", scope.catalog)
+
     def test_guest_scope_checks_required_arguments_and_notification_direction(self):
         with Gateway(self.scope("guest")) as bridge:
             version = request(bridge.url, "initialize", {"protocolVersion": "2025-06-18"})

@@ -402,7 +402,7 @@ def notify_failed_dm(scope, cid, tier, cfg):
         log("could not deliver the model failure notice")
 
 
-def run_agent(cid, task, tier, cfg, *, web_query=None):
+def run_agent(cid, task, tier, cfg, *, web_query=None, followup_ids=()):
     harness = harnesses.harness_name(cfg)
     if harness == "claude":
         return run_claude(cid, task, tier, cfg)
@@ -411,7 +411,7 @@ def run_agent(cid, task, tier, cfg, *, web_query=None):
     try:
         def gateway_scope():
             return gateway.TelegramScope(Mcp(MCP_URL), cid, tier, cfg, MEMORY,
-                                         research=web_query is not None)
+                                         research=web_query is not None, followup_ids=followup_ids)
 
         scope = gateway_scope()
         safe_cfg = cfg if tier == "owner" else dict(cfg, OWNER_NAME="владелец", OWNER_USERNAME="")
@@ -445,6 +445,23 @@ def run_agent(cid, task, tier, cfg, *, web_query=None):
                              "В memory_write передай полное обновлённое содержимое памяти. "
                              "Если нужного инструмента нет в списке, найди его через find_telegram_tool "
                              "и вызови через call_telegram_tool с аргументами из найденной схемы.")
+            if scope.followup_store is not None:
+                if scope.followup_store.path.is_file():
+                    instructions += (
+                        " Если новая реплика продолжает прежнее поручение, проверь запись через "
+                        "owner_followup с action=read, даже когда адресат виден в свежих репликах. "
+                        "Память даёт контекст. Выполняй действие только по новой реплике владельца. "
+                        "Если статус sent, сообщи результат. Если delivery_unknown, проверь историю "
+                        "адресата; догадка о сбое сама по себе не разрешает повторную отправку. "
+                    )
+                instructions += (
+                    " Если владелец поручил написать в другой чат и нужны данные или согласование "
+                    "черновика, сохрани поручение через owner_followup с action=remember и отправь "
+                    "владельцу уточняющий вопрос через send_message. При возобновлении отправляй "
+                    "текст через send_message. Шлюз запомнит состояние доставки. Используй "
+                    "action=clear при отмене или завершении поручения без внешней отправки. "
+                    "Для несвязанного разговора память поручения не нужна."
+                )
             if scope.allow_web:
                 instructions += (
                     " В личке есть search_web. Используй его по явной просьбе и по своей инициативе, "
@@ -755,7 +772,12 @@ class Dispatcher:
             if owner_messages:
                 recent = self.owner_dm_context(cid, int(owner_messages[0]["id"]))
         task = private_task(ev, tier, self.cfg, recent=recent, messages=owner_messages)
-        run_agent(cid, task, tier, self.cfg)
+        followup_ids = tuple(int(message["id"]) for message in owner_messages
+                             if message.get("text") and not message.get("forwarded"))
+        if followup_ids:
+            run_agent(cid, task, tier, self.cfg, followup_ids=followup_ids)
+        else:
+            run_agent(cid, task, tier, self.cfg)
 
     def owner_dm_context(self, cid, first_id):
         try:

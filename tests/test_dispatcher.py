@@ -96,7 +96,8 @@ class Base(unittest.TestCase):
         self.d = D.Dispatcher(self.mcp, self.cur)
         self.d.cfg = dict(CFG)
         self.runs = []
-        p = mock.patch.object(D, "run_agent", lambda cid, task, tier, cfg: self.runs.append((cid, tier, task)))
+        p = mock.patch.object(D, "run_agent",
+                              lambda cid, task, tier, cfg, **kw: self.runs.append((cid, tier, task)))
         p.start()
         self.addCleanup(p.stop)
         mock.patch.object(D, "log", lambda *a: None).start()
@@ -127,7 +128,7 @@ class Private(Base):
         calls = run.call_args_list
         self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP, OWNER])
         self.assertEqual([call.kwargs for call in calls], [
-            {}, {"web_query": "release schedule"}, {}, {}, {}, {},
+            {"followup_ids": (10,)}, {"web_query": "release schedule"}, {"followup_ids": (12,)}, {}, {}, {},
         ])
 
     def test_contextual_question_runs_the_agent_without_a_prefilled_search(self):
@@ -135,7 +136,7 @@ class Private(Base):
         with mock.patch.object(D, "run_agent") as run:
             self.d.run_private(OWNER, [msg(10, 1, text="А когда заканчивается её поддержка?")])
         run.assert_called_once()
-        self.assertEqual(run.call_args.kwargs, {})
+        self.assertEqual(run.call_args.kwargs, {"followup_ids": (10,)})
 
     def test_owner_followup_carries_recipient_question_and_reply(self):
         followup = msg(12, 1, text="Просто приветствие", reply_to=11)
@@ -239,7 +240,7 @@ class Private(Base):
 
     def test_cursor_saved_before_the_run(self):
         self.chat(OWNER, "private", msg(10, 20))
-        D.run_agent = lambda *a: self.runs.append(json.loads(self.cur.path.read_text())["chats"])
+        D.run_agent = lambda *a, **kw: self.runs.append(json.loads(self.cur.path.read_text())["chats"])
         self.d.process(OWNER, "feed")
         self.assertEqual(self.runs, [{str(OWNER): 10}])
 
