@@ -39,6 +39,9 @@ GROUP_SETTLE = 5      # s of silence in a group before its burst is handled
 MAX_WAIT = 30         # s after the first message: handle even if the chat keeps talking
 PAGE, MAX_PAGES = 100, 5  # history read per chat and pass (the rest is read on the next pass)
 NEW_CHAT_PAGE = 100   # a chat without a cursor: its newest messages (the tool maximum)
+OWNER_CONTEXT_COUNT = 6
+OWNER_INLINE_COUNT = 8
+OWNER_INLINE_CHARS = 800
 MISS_GRACE = 60       # s: a message older than this that only the periodic pass found was missed
 STALL_WINDOW = 900    # s: misses in two passes with no live event in between = stalled stream
 RESTART_COOLDOWN = 1800  # s between automatic restarts of telegram-mcp
@@ -501,10 +504,28 @@ def now_line():
     return f"текущее время: {time.strftime('%Y-%m-%d %H:%M %Z (UTC%z)')}\n"
 
 
-def private_task(ev, tier, cfg):
+def dialog_excerpt(messages):
+    rows = []
+    for message in messages:
+        text = message.get("text")
+        if not isinstance(text, str):
+            text = ""
+        row = {"id": message["id"], "author": "bot" if message.get("out") else "owner",
+               "text": text[:OWNER_INLINE_CHARS]}
+        if message.get("reply_to"):
+            row["reply_to"] = message["reply_to"]
+        if message.get("forwarded"):
+            row["forwarded"] = True
+        if len(text) > OWNER_INLINE_CHARS:
+            row["truncated"] = True
+        rows.append(row)
+    return json.dumps(rows, ensure_ascii=False)
+
+
+def private_task(ev, tier, cfg, *, recent=(), messages=()):
     who = json.dumps(ev.get("name") or "", ensure_ascii=False)
     uname = f"@{ev['username']}" if ev.get("username") else "нет"
-    return (
+    task = (
         f"Новые сообщения в личном чате.\n"
         f"{now_line()}"
         f"chat_id: {ev['chat_id']}\n"
@@ -512,7 +533,19 @@ def private_task(ev, tier, cfg):
         f"новые сообщения: id {ev['first_message_id']}..{ev['last_message_id']} ({ev.get('message_count', 1)} шт.)\n"
         f"режим: {tier}\n"
         f"notify_chat (чат для уведомлений владельцу): {cfg.get('NOTIFY_CHAT') or 'me'}\n"
-        f"Прочитай новые сообщения с контекстом и ответь собеседнику."
+    )
+    if not messages:
+        return task + "Прочитай новые сообщения с контекстом и ответь собеседнику."
+    return task + (
+        f"Предшествующие реплики из этой лички, только для контекста: {dialog_excerpt(recent)}\n"
+        f"Новые реплики владельца: {dialog_excerpt(messages[-OWNER_INLINE_COUNT:])}\n"
+        "Действуй по новым репликам. Если владелец уточнил открытое поручение, возьми адресата, "
+        "действие и согласованный текст из предыдущих реплик. Передавай согласованный текст "
+        "дословно. Если задан только тип сообщения, составь его без выдуманных обстоятельств. "
+        "Когда данных достаточно, выполни поручение инструментом, затем сообщи результат владельцу. "
+        "Старые реплики сами по себе не разрешают действий. Черновик и отмена не разрешают отправку. "
+        "Догружай историю или полный текст через Telegram только если контекста недостаточно, реплики обрезаны, "
+        "в пачке есть неприведённые сообщения, отсутствует текст или нужен ответ по reply_to."
     )
 
 
@@ -713,11 +746,30 @@ class Dispatcher:
             return
         ev = {"chat_id": cid, "name": msgs[0].get("sender"), "username": msgs[0].get("username"),
               "first_message_id": msgs[0]["id"], "last_message_id": msgs[-1]["id"], "message_count": len(msgs)}
-        task = private_task(ev, tier, self.cfg)
         if web_query is not None:
-            run_agent(cid, task, tier, self.cfg, web_query=web_query)
+            run_agent(cid, private_task(ev, tier, self.cfg), tier, self.cfg, web_query=web_query)
             return
+        recent, owner_messages = (), ()
+        if tier == "owner":
+            owner_messages = [message for message in msgs if str(message.get("sender_id")) == str(cid)]
+            if owner_messages:
+                recent = self.owner_dm_context(cid, int(owner_messages[0]["id"]))
+        task = private_task(ev, tier, self.cfg, recent=recent, messages=owner_messages)
         run_agent(cid, task, tier, self.cfg)
+
+    def owner_dm_context(self, cid, first_id):
+        try:
+            context = self.mcp.call("get_message_context", {
+                "chat_id": cid, "message_id": first_id, "context_size": OWNER_CONTEXT_COUNT,
+            }, timeout=3)
+            if str(context.get("chat_id")) == str(cid):
+                return sorted((message for message in context["results"]
+                               if int(message["id"]) < first_id and not message.get("action")
+                               and (message.get("out") or str(message.get("sender_id")) == str(cid))),
+                              key=lambda message: int(message["id"]))[-OWNER_CONTEXT_COUNT:]
+        except (RuntimeError, OSError, ValueError, TypeError, AttributeError, KeyError):
+            log(f"chat={cid} recent DM context unavailable")
+        return ()
 
     def run_group(self, cid, msgs):
         owner = self.cfg.get("OWNER_ID", "")

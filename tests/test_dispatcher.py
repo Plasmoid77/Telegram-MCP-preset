@@ -43,6 +43,9 @@ class FakeMcp:
                 rest = [m for m in ms if m["id"] > args["after_id"]]
                 page, more = rest[:args["limit"]], len(rest) > args["limit"]
             return {"chat_id": args["chat_id"], "chat_type": c["type"], "has_more": more, "messages": page}
+        if name == "get_message_context":
+            chat = self.chats.get(args["chat_id"], {"messages": []})
+            return {"chat_id": args["chat_id"], "results": chat["messages"]}
         if name == "list_chats":
             return json.dumps({"results": self.dialogs})
         if name == "get_chat":
@@ -133,6 +136,36 @@ class Private(Base):
             self.d.run_private(OWNER, [msg(10, 1, text="А когда заканчивается её поддержка?")])
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs, {})
+
+    def test_owner_followup_carries_recipient_question_and_reply(self):
+        followup = msg(12, 1, text="Просто приветствие", reply_to=11)
+        self.chat(OWNER, "private", msg(13, 0, text="последующее сообщение"),
+                  msg(11, 10, out=True, text="Что ему передать?"),
+                  msg(10, 12, text="Напиши @sample_recipient"), followup,
+                  msg(9, 25, sender=GUEST, text="другой собеседник"))
+        self.d.run_private(OWNER, [followup])
+        self.assertEqual(self.mcp.calls, ["get_message_context"])
+        self.assertEqual(len(self.runs), 1)
+        task = self.runs[0][2]
+        history, messages = [json.loads(line.split(": ", 1)[1]) for line in task.splitlines()
+                             if line.startswith(("Предшествующие реплики", "Новые реплики"))]
+        self.assertEqual(history, [
+            {"id": 10, "author": "owner", "text": "Напиши @sample_recipient"},
+            {"id": 11, "author": "bot", "text": "Что ему передать?"},
+        ])
+        self.assertEqual(messages, [{"id": 12, "author": "owner", "text": "Просто приветствие", "reply_to": 11}])
+
+    def test_owner_can_still_reply_when_context_lookup_fails(self):
+        with mock.patch.object(self.mcp, "call", side_effect=TimeoutError):
+            self.d.run_private(OWNER, [msg(12, 1, text="На связи?")])
+        self.assertEqual(len(self.runs), 1)
+        self.assertIn('"text": "На связи?"', self.runs[0][2])
+        self.assertIn("Догружай историю", self.runs[0][2])
+
+    def test_guest_message_is_not_preloaded_into_task(self):
+        self.d.run_private(GUEST, [msg(12, 1, text="guest message text", sender=GUEST)])
+        self.assertEqual(self.mcp.calls, [])
+        self.assertNotIn("guest message text", self.runs[0][2])
 
     def test_feed_max_does_not_hide_an_earlier_lost_message(self):
         self.cur.chats[OWNER] = 100
