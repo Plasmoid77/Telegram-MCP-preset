@@ -53,6 +53,37 @@ class FakeMcp:
         raise AssertionError(name)
 
 
+class OpenCodeRetry(unittest.TestCase):
+    def test_header_timeout_retries_with_remaining_budget_and_fresh_gateway(self):
+        cfg = dict(CFG, HARNESS="opencode", MODEL="opencode-go/test", MAX_TURNS="5", RUN_TIMEOUT="30")
+        upstream = mock.Mock()
+        upstream.catalog.return_value = []
+        failed = D.harnesses.RunResult(1, True, True)
+        passed = D.harnesses.RunResult(0, False, False)
+        with mock.patch.object(D, "Mcp", return_value=upstream), \
+             mock.patch.object(D, "system_prompt", return_value="prompt"), \
+             mock.patch.object(D.harnesses, "run", side_effect=[failed, passed]) as run:
+            D.run_agent(OWNER, "test", "owner", cfg)
+        first, second = run.call_args_list
+        self.assertNotEqual(first.args[4], second.args[4])
+        self.assertEqual(second.args[0]["OPENCODE_HEADER_TIMEOUT_MS"], "300000")
+        self.assertTrue(0 < second.kwargs["time_left"] < 30)
+        upstream.tool_result.assert_not_called()
+
+    def test_failure_notice_is_suppressed_after_an_ambiguous_write(self):
+        cfg = dict(CFG, HARNESS="opencode", MODEL="opencode-go/test", MAX_TURNS="5", RUN_TIMEOUT="30")
+        upstream = mock.Mock()
+        upstream.catalog.return_value = []
+        failed = D.harnesses.RunResult(1, True, True)
+        with mock.patch.object(D, "Mcp", return_value=upstream), \
+             mock.patch.object(D, "system_prompt", return_value="prompt"), \
+             mock.patch.object(D.harnesses, "run", return_value=failed) as run, \
+             mock.patch.object(D.gateway.TelegramScope, "no_effects_attempted", return_value=False):
+            D.run_agent(OWNER, "test", "owner", cfg)
+        run.assert_called_once()
+        upstream.tool_result.assert_not_called()
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -83,15 +114,19 @@ class Private(Base):
         self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
         self.assertEqual(self.cur.chats[OWNER], 10)
 
-    def test_only_explicit_owner_dms_enable_web_research(self):
+    def test_only_owner_dms_enable_web_research(self):
         self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
         with mock.patch.object(D, "run_agent") as run:
             self.d.run_private(OWNER, [msg(10, 1), msg(11, 1, text="/web release schedule"), msg(12, 1)])
             self.d.run_private(GUEST, [msg(13, 1, text="/web release schedule", sender=GUEST)])
             self.d.run_group(GROUP, [msg(14, 1, text="/web release schedule")])
+            self.d.run_private(OWNER, [msg(15, 1, text="/web forwarded text", forwarded=True)])
         calls = run.call_args_list
-        self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP])
-        self.assertEqual([call.kwargs for call in calls], [{}, {"web_query": "release schedule"}, {}, {}, {}])
+        self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP, OWNER])
+        self.assertEqual([call.kwargs for call in calls], [
+            {"web_messages": ("hi",)}, {"web_query": "release schedule"},
+            {"web_messages": ("hi",)}, {}, {}, {},
+        ])
 
     def test_feed_max_does_not_hide_an_earlier_lost_message(self):
         self.cur.chats[OWNER] = 100

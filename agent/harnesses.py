@@ -8,8 +8,10 @@ import signal
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 HARNESS_NAMES = {"claude", "codex", "opencode", "command"}
+OPENCODE_STANDARD_HEADER_TIMEOUT_MS = 300_000
 CODEX_DISABLED = ("shell_tool", "unified_exec", "view_image", "apps", "multi_agent", "hooks", "goals", "code_mode")
 
 
@@ -49,10 +51,10 @@ def custom_command(cfg):
 
 
 def opencode_timeouts(cfg):
-    return {
-        "headerTimeout": int(cfg.get("OPENCODE_HEADER_TIMEOUT_MS", "20000")),
-        "chunkTimeout": int(cfg.get("OPENCODE_CHUNK_TIMEOUT_MS", "45000")),
-    }
+    values = {"headerTimeout": int(cfg.get("OPENCODE_HEADER_TIMEOUT_MS", "20000"))}
+    if cfg.get("OPENCODE_CHUNK_TIMEOUT_MS"):
+        values["chunkTimeout"] = int(cfg["OPENCODE_CHUNK_TIMEOUT_MS"])
+    return values
 
 
 def preflight(cfg):
@@ -139,8 +141,34 @@ def machine_success(harness, code, lines):
     return "step_finish" in kinds and "error" not in kinds
 
 
-def run(cfg, harness, tier, prompt, url, names):
+class RunResult(NamedTuple):
+    rc: int
+    error: bool
+    header_timeout: bool
+
+
+def opencode_header_timeout(lines):
+    for line in lines:
+        if "error" not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "error":
+            continue
+        detail = json.dumps(event.get("error")).lower()
+        if any(phrase in detail for phrase in ("timed out waiting for response headers",
+                                               "headerstimeouterror", "headers timed out",
+                                               "headers timeout", "header timeout")):
+            return True
+    return False
+
+
+def run(cfg, harness, tier, prompt, url, names, *, time_left=None):
     steps, timeout = steps_and_timeout(cfg, tier)
+    if time_left is not None:
+        timeout = min(timeout, time_left)
     with tempfile.TemporaryDirectory(prefix="telegram-agent-") as tmp:
         directory = Path(tmp)
         env = dict(os.environ, PWD=tmp)
@@ -162,4 +190,7 @@ def run(cfg, harness, tier, prompt, url, names):
                     process.communicate()
                     raise
             output.seek(0)
-            return process.returncode, not machine_success(harness, process.returncode, output)
+            error = not machine_success(harness, process.returncode, output)
+            output.seek(0)
+            header_timeout = error and harness == "opencode" and opencode_header_timeout(output)
+            return RunResult(process.returncode, error, header_timeout)

@@ -7,10 +7,11 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 from gateway import Gateway, TelegramScope, TEXT_PAGE, text_result
-from harnesses import machine_success, opencode_config
+from harnesses import machine_success, opencode_config, opencode_header_timeout
 from web_research import Results, requested_query
 
 
@@ -120,7 +121,13 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([(rule["action"], rule["effect"]) for rule in config["permissions"]],
                          [("*", "deny"), ("telegram_get_history", "allow")])
         self.assertEqual(config["providers"]["opencode-go"]["settings"],
-                         {"headerTimeout": 15000, "chunkTimeout": 45000})
+                         {"headerTimeout": 15000})
+        self.assertTrue(opencode_header_timeout([
+            '{"type":"error","error":{"data":{"message":"Provider response headers timed out"}}}']))
+        self.assertTrue(opencode_header_timeout([
+            '{"type":"error","error":{"type":"provider.transport","message":"Timed out waiting for response headers"}}']))
+        self.assertFalse(opencode_header_timeout([
+            '{"type":"text","part":{"text":"Provider response headers timed out"}}']))
 
     def test_web_research_can_only_reply_to_the_requesting_chat(self):
         scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "NOTIFY_CHAT": "me"},
@@ -153,3 +160,38 @@ class GatewayTests(unittest.TestCase):
                     <td class="result-snippet">Also drop this</td>""")
         self.assertEqual(parser.results, [{"url": "https://python.org", "title": "Python & docs",
                                            "snippet": "Stable releases"}])
+
+    @patch("gateway.web_research.search", return_value=([{"url": "https://python.org"}], ""))
+    def test_automatic_web_search_uses_only_current_text_and_then_restricts_tools(self, search):
+        cfg = {"SELF_ID": "5", "OWNER_ID": "101", "NOTIFY_CHAT": "me"}
+        texts = ("Какая последняя версия Python?",)
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=texts)
+        self.assertIn("search_web", scope.catalog)
+        self.assertNotIn("search_web", TelegramScope(
+            self.upstream, -100, "owner", cfg, self.memory, web_messages=texts).catalog)
+        self.assertNotIn("search_web", TelegramScope(
+            self.upstream, 101, "guest", cfg, self.memory, web_messages=texts).catalog)
+        self.assertFalse(scope.call("get_history", {"chat_id": 101})["isError"])
+        self.assertTrue(scope.call("search_web", {"query": "from memory"})["isError"])
+        self.assertTrue(scope.no_effects_attempted())
+        self.assertFalse(scope.call("search_web", {"query": "версия python"})["isError"])
+        search.assert_called_once_with("версия Python")
+        self.assertFalse(scope.no_effects_attempted())
+        self.assertTrue(scope.no_effects_attempted(allow_search=True))
+        for name, args in (("memory_write", {"text": "untrusted"}),
+                           ("call_telegram_tool", {"name": "send_message", "arguments": {"chat_id": 9}}),
+                           ("get_history", {"chat_id": 101}), ("send_message", {"chat_id": 9, "message": "no"})):
+            self.assertTrue(scope.call(name, args)["isError"])
+        self.assertFalse(scope.call("search_web", {"query": "последняя версия Python"})["isError"])
+        self.assertTrue(scope.call("search_web", {"query": "Python"})["isError"])
+        self.assertFalse(scope.call("send_message", {"chat_id": 101, "message": "summary"})["isError"])
+        self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "duplicate"})["isError"])
+
+    @patch("gateway.web_research.search")
+    def test_telegram_mutation_blocks_web_lookup_and_backend_retry(self, search):
+        scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "OWNER_ID": "101"},
+                              self.memory, web_messages=("Python",))
+        self.assertFalse(scope.call("memory_write", {"text": "Owner rule"})["isError"])
+        self.assertFalse(scope.no_effects_attempted())
+        self.assertTrue(scope.call("search_web", {"query": "Python"})["isError"])
+        search.assert_not_called()

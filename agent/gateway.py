@@ -6,6 +6,7 @@ import threading
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import web_research
 
 GUEST_CHAT_TOOLS = {
     "get_history", "get_messages_after", "get_message_context", "get_messages",
@@ -16,6 +17,11 @@ GUEST_TOOLS = GUEST_CHAT_TOOLS | {
     "get_me", "get_user_status", "send_message", "reply_to_message", "forward_message",
 }
 BLOCKED_TOOLS = {"disable_incoming_feed", "wait_for_settled_message"}
+READ_ONLY_TELEGRAM = {
+    "get_me", "get_history", "get_messages_after", "get_message_context", "get_messages",
+    "list_messages", "get_chat", "get_user_status", "list_chats", "search_messages", "search_global",
+    "resolve_username", "list_topics", "list_folders", "get_folder", "get_message_link",
+}
 OWNER_DIRECT_TOOLS = GUEST_TOOLS | {
     "list_chats", "search_messages", "search_global", "resolve_username",
     "list_topics", "list_folders", "get_folder", "create_folder", "delete_folder",
@@ -48,6 +54,10 @@ FIND_TOOL = tool("find_telegram_tool", "Find additional Telegram tools and their
                  {"query": {"type": "string", "description": "Part of a tool name, such as 'folder'."}})
 CALL_TOOL = tool("call_telegram_tool", "Call an additional Telegram tool using its exact input schema.",
                  {"name": {"type": "string"}, "arguments": {"type": "object"}})
+WEB_SEARCH = tool("search_web", "Search the public web for current facts or sources. Copy one "
+                  "public phrase verbatim from the owner's current messages; do not rewrite it. "
+                  "After searching, reply with links using send_message in this chat.",
+                  {"query": {"type": "string", "maxLength": web_research.MAX_QUERY}})
 
 
 def normalize(value):
@@ -91,12 +101,14 @@ def text_result(text, error=False):
 
 
 class TelegramScope:
-    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False):
+    def __init__(self, upstream, cid, tier, cfg, memory, *, research=False, web_messages=()):
         self.upstream = upstream
         self.tier = tier
         self.chat = int(cid)
         self.research = research
-        self.research_replied = False
+        self.writes_attempted = False
+        self.web_calls = 0
+        self.web_messages = web_messages if not research and tier == "owner" and str(cid) == cfg.get("OWNER_ID") else ()
         self.self_id = cfg.get("SELF_ID", "")
         target = normalize(cfg.get("NOTIFY_CHAT") or "me")
         own_id = normalize(self.self_id)
@@ -124,6 +136,39 @@ class TelegramScope:
             self.catalog[READ_RESULT["name"]] = READ_RESULT
         if tier == "owner" and not research:
             self.catalog.update({item["name"]: item for item in (MEMORY_READ, MEMORY_WRITE, FIND_TOOL, CALL_TOOL)})
+        if self.web_messages:
+            self.catalog[WEB_SEARCH["name"]] = WEB_SEARCH
+
+    def no_effects_attempted(self, *, allow_search=False):
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            return not self.writes_attempted and (allow_search or not self.web_calls)
+        finally:
+            self.lock.release()
+
+    def search_web(self, args):
+        if self.writes_attempted or self.web_calls >= 2:
+            return text_result("Search is available before Telegram changes, up to two queries per run.", True)
+        query = web_research.query_from_messages(args.get("query"), self.web_messages)
+        if query is None:
+            return text_result("Copy a public phrase verbatim from the owner's current messages.", True)
+        self.research = True
+        self.last_result = None
+        self.web_calls += 1
+        results, error = web_research.search(query)
+        if error:
+            return text_result(error, True)
+        return text_result(json.dumps(results, ensure_ascii=False))
+
+    def reply_to_research(self, args):
+        args = guest_arguments("send_message", args, self.chat, {})
+        message = args.get("message") if args is not None else None
+        if (self.writes_attempted or not isinstance(message, str) or not 0 < len(message) <= 4096
+                or args.keys() != {"chat_id", "message"}):
+            return text_result("Send one plain text answer in the requesting chat.", True)
+        self.writes_attempted = True
+        return self.upstream.tool_result("send_message", args, timeout=20)
 
     def page(self, offset):
         result_id, text = self.last_result
@@ -137,6 +182,12 @@ class TelegramScope:
                 return text_result("This run has ended.", True)
             if name not in self.catalog:
                 return text_result("This tool is unavailable in the current run.", True)
+            if name == WEB_SEARCH["name"]:
+                return self.search_web(args)
+            if self.research:
+                if name == "send_message":
+                    return self.reply_to_research(args)
+                return text_result("After web research, only a reply in the requesting chat is available.", True)
             if name == READ_RESULT["name"]:
                 offset = args.get("offset")
                 if (not self.last_result or args.get("result_id") != self.last_result[0]
@@ -153,6 +204,7 @@ class TelegramScope:
                 text = args.get("text")
                 if not isinstance(text, str) or len(text) > MAX_MEMORY:
                     return text_result("Invalid memory text.", True)
+                self.writes_attempted = True
                 with NamedTemporaryFile(dir=self.memory.parent, mode="w", encoding="utf-8",
                                         prefix=".memory.", delete=False) as stream:
                     staging = Path(stream.name)
@@ -175,22 +227,15 @@ class TelegramScope:
                 name, args = args.get("name"), args.get("arguments")
                 if not isinstance(name, str) or name not in self.upstream_tools or not isinstance(args, dict):
                     return text_result("Unknown Telegram tool or invalid arguments.", True)
-            if self.research:
-                args = guest_arguments(name, args, self.chat, {})
-                message = args.get("message") if args is not None else None
-                if (self.research_replied or not isinstance(message, str) or not 0 < len(message) <= 4096
-                        or args.keys() != {"chat_id", "message"}):
-                    return text_result("Send one plain text answer in the requesting chat.", True)
-                result = self.upstream.tool_result(name, args, timeout=20)
-                self.research_replied = not result.get("isError")
-                return result
-            elif self.tier == "guest":
+            if self.tier == "guest":
                 args = guest_arguments(name, args, self.chat, self.notify)
                 if args is None:
                     return text_result("Blocked by guard: this operation is outside the current chat.", True)
                 if name == "get_me":
                     # Expose the bot identity without private Telegram account metadata.
                     return text_result(json.dumps({"id": int(self.self_id)}))
+            if name not in READ_ONLY_TELEGRAM:
+                self.writes_attempted = True
             return self.paginate(self.upstream.tool_result(name, args, timeout=180))
 
     def paginate(self, result):

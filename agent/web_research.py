@@ -1,4 +1,4 @@
-"""Read-only web research from explicit requests in the owner's private chat."""
+"""Read-only web research using queries grounded in the owner's current DM."""
 
 from html.parser import HTMLParser
 from http.client import HTTPException, HTTPSConnection
@@ -16,16 +16,35 @@ MAX_RESULTS = 6
 HOST = "lite.duckduckgo.com"
 
 
-def requested_query(message):
-    """Return None for an ordinary message, or the owner's literal search query."""
+def authored_text(message):
     if message.get("forwarded") or any(
         entity.get("type") in ("blockquote", "code", "pre")
         for entity in (message.get("formatting") or [])
     ):
-        return None
-    text = (message.get("text") or "").strip()
+        return ""
+    return " ".join((message.get("text") or "").split())
+
+
+def requested_query(message):
+    """Return the literal query of an explicit search, or None."""
+    text = authored_text(message)
     prefix = QUERY.match(text)
     return " ".join(text[prefix.end():].split()) if prefix else None
+
+
+def query_from_messages(query, messages):
+    """Send exactly the author's words, even when the model changes whitespace or case."""
+    if not isinstance(query, str):
+        return None
+    query = " ".join(query.split())
+    if not 0 < len(query) <= MAX_QUERY:
+        return None
+    pattern = re.compile(r"(?<!\w)" + re.escape(query) + r"(?!\w)", re.IGNORECASE)
+    for message in messages:
+        match = pattern.search(message)
+        if match:
+            return match[0]
+    return None
 
 
 def result_url(href):
