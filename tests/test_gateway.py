@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 from gateway import Gateway, TelegramScope, TEXT_PAGE, text_result
 from harnesses import machine_success, opencode_config, opencode_header_timeout
-from web_research import Results, requested_query
+from web_research import Results, query_from_messages, requested_query
 
 
 class Upstream:
@@ -20,7 +20,7 @@ class Upstream:
         self.calls = []
 
     def catalog(self):
-        names = ("get_me", "get_history", "get_user_status", "send_message", "open_photo",
+        names = ("get_me", "get_history", "get_user_status", "send_message", "send_typing", "open_photo",
                  "transcribe_voice", "forward_message", "list_chats", "search_contacts", "disable_incoming_feed")
         return [{"name": name, "inputSchema": {"type": "object"}} for name in names]
 
@@ -161,6 +161,16 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(parser.results, [{"url": "https://python.org", "title": "Python & docs",
                                            "snippet": "Stable releases"}])
 
+    def test_expanded_query_recovers_the_literal_versioned_name(self):
+        messages = ("Насколько локальная модель лучше или хуже ChatGPT 6.2 Sol?",)
+        self.assertEqual(query_from_messages("GPT-6.2 Sol модель OpenAI", messages), "ChatGPT 6.2 Sol")
+        self.assertEqual(query_from_messages("характеристики Qwen-3.8 Flash для Codex",
+                                             ("Сравни Qwen3.8 Flash с Sol.",)), "Qwen3.8 Flash")
+        self.assertIsNone(query_from_messages("GPT-6.1 Sol модель OpenAI", messages))
+        self.assertIsNone(query_from_messages("GPT-6.2 Flash OpenAI", messages))
+        self.assertIsNone(query_from_messages("GPT-6.2 Sol OpenAI", ("Вот ChatGPT. 6.2 Sol.",)))
+        self.assertIsNone(query_from_messages("адрес из памяти", messages))
+
     @patch("gateway.web_research.search", return_value=([{"url": "https://python.org"}], ""))
     def test_automatic_web_search_uses_only_current_text_and_then_restricts_tools(self, search):
         cfg = {"SELF_ID": "5", "OWNER_ID": "101", "NOTIFY_CHAT": "me"}
@@ -195,3 +205,14 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(scope.no_effects_attempted())
         self.assertTrue(scope.call("search_web", {"query": "Python"})["isError"])
         search.assert_not_called()
+
+    @patch("gateway.web_research.search", return_value=([{"url": "https://openai.com"}], ""))
+    def test_typing_keeps_search_and_reply_available(self, search):
+        scope = TelegramScope(self.upstream, 101, "owner", {"SELF_ID": "5", "OWNER_ID": "101"},
+                              self.memory, web_messages=("Что такое ChatGPT 6.2 Sol?",))
+        self.assertFalse(scope.call("send_typing", {"chat_id": 101})["isError"])
+        self.assertFalse(scope.no_effects_attempted())
+        self.assertFalse(scope.call("search_web", {"query": "GPT-6.2 Sol OpenAI"})["isError"])
+        search.assert_called_once_with("ChatGPT 6.2 Sol")
+        self.assertFalse(scope.call("send_message", {"chat_id": 101, "message": "summary"})["isError"])
+        self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "duplicate"})["isError"])

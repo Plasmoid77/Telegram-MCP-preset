@@ -14,6 +14,16 @@ QUERY = re.compile(r"^(?:/web(?:\s+|$)|(?:поищи|найди|проверь)\
 MAX_QUERY = 400
 MAX_RESULTS = 6
 HOST = "lite.duckduckgo.com"
+VERSIONED_NAME = re.compile(
+    r"\b([a-z][a-z0-9]*?)[ _-]*(\d+(?:\.\d+)+)(?:[ _-]+([a-z][a-z0-9]*))?(?!\w|\.\d)",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def versioned_name_key(match):
+    name, version, variant = match.groups()
+    name = name.lower()
+    return ("gpt" if name == "chatgpt" else name, version, (variant or "").lower())
 
 
 def authored_text(message):
@@ -44,6 +54,14 @@ def query_from_messages(query, messages):
         match = pattern.search(message)
         if match:
             return match[0]
+    # Recover the complete shared versioned name, without transmitting added words
+    # or accepting a different version or variant.
+    requested = {versioned_name_key(match) for match in VERSIONED_NAME.finditer(query)}
+    if requested:
+        for message in messages:
+            for match in VERSIONED_NAME.finditer(message):
+                if len(match[0]) <= MAX_QUERY and versioned_name_key(match) in requested:
+                    return match[0]
     return None
 
 

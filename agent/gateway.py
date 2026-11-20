@@ -22,6 +22,7 @@ READ_ONLY_TELEGRAM = {
     "list_messages", "get_chat", "get_user_status", "list_chats", "search_messages", "search_global",
     "resolve_username", "list_topics", "list_folders", "get_folder", "get_message_link",
 }
+CHAT_STATUS_TOOLS = {"mark_as_read", "send_typing"}
 OWNER_DIRECT_TOOLS = GUEST_TOOLS | {
     "list_chats", "search_messages", "search_global", "resolve_username",
     "list_topics", "list_folders", "get_folder", "create_folder", "delete_folder",
@@ -54,8 +55,8 @@ FIND_TOOL = tool("find_telegram_tool", "Find additional Telegram tools and their
                  {"query": {"type": "string", "description": "Part of a tool name, such as 'folder'."}})
 CALL_TOOL = tool("call_telegram_tool", "Call an additional Telegram tool using its exact input schema.",
                  {"name": {"type": "string"}, "arguments": {"type": "object"}})
-WEB_SEARCH = tool("search_web", "Search the public web for current facts or sources. Copy one "
-                  "public phrase verbatim from the owner's current messages; do not rewrite it. "
+WEB_SEARCH = tool("search_web", "Search the public web for current facts or sources. Use a short "
+                  "public phrase from the owner's current messages, such as a model name and version. "
                   "After searching, reply with links using send_message in this chat.",
                   {"query": {"type": "string", "maxLength": web_research.MAX_QUERY}})
 
@@ -107,6 +108,7 @@ class TelegramScope:
         self.chat = int(cid)
         self.research = research
         self.writes_attempted = False
+        self.web_blocked = False
         self.web_calls = 0
         self.web_messages = web_messages if not research and tier == "owner" and str(cid) == cfg.get("OWNER_ID") else ()
         self.self_id = cfg.get("SELF_ID", "")
@@ -148,11 +150,14 @@ class TelegramScope:
             self.lock.release()
 
     def search_web(self, args):
-        if self.writes_attempted or self.web_calls >= 2:
-            return text_result("Search is available before Telegram changes, up to two queries per run.", True)
+        if self.web_blocked:
+            return text_result("Запрос не отправлен: запускай поиск до отправки сообщения или изменения данных.", True)
+        if self.web_calls >= 2:
+            return text_result("Лимит поиска: два отправленных запроса за запуск.", True)
         query = web_research.query_from_messages(args.get("query"), self.web_messages)
         if query is None:
-            return text_result("Copy a public phrase verbatim from the owner's current messages.", True)
+            return text_result("Запрос не отправлен: скопируй короткую публичную фразу из новых "
+                               "сообщений владельца, например название модели и номер версии.", True)
         self.research = True
         self.last_result = None
         self.web_calls += 1
@@ -164,10 +169,11 @@ class TelegramScope:
     def reply_to_research(self, args):
         args = guest_arguments("send_message", args, self.chat, {})
         message = args.get("message") if args is not None else None
-        if (self.writes_attempted or not isinstance(message, str) or not 0 < len(message) <= 4096
+        if (self.web_blocked or not isinstance(message, str) or not 0 < len(message) <= 4096
                 or args.keys() != {"chat_id", "message"}):
             return text_result("Send one plain text answer in the requesting chat.", True)
         self.writes_attempted = True
+        self.web_blocked = True
         return self.upstream.tool_result("send_message", args, timeout=20)
 
     def page(self, offset):
@@ -205,6 +211,7 @@ class TelegramScope:
                 if not isinstance(text, str) or len(text) > MAX_MEMORY:
                     return text_result("Invalid memory text.", True)
                 self.writes_attempted = True
+                self.web_blocked = True
                 with NamedTemporaryFile(dir=self.memory.parent, mode="w", encoding="utf-8",
                                         prefix=".memory.", delete=False) as stream:
                     staging = Path(stream.name)
@@ -236,6 +243,8 @@ class TelegramScope:
                     return text_result(json.dumps({"id": int(self.self_id)}))
             if name not in READ_ONLY_TELEGRAM:
                 self.writes_attempted = True
+                if name not in CHAT_STATUS_TOOLS:
+                    self.web_blocked = True
             return self.paginate(self.upstream.tool_result(name, args, timeout=180))
 
     def paginate(self, result):
