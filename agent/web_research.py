@@ -1,4 +1,4 @@
-"""Read-only web research using queries grounded in the owner's current DM."""
+"""Read-only web research from the owner's current DM and an opted-in public model ID."""
 
 from html.parser import HTMLParser
 from http.client import HTTPException, HTTPSConnection
@@ -9,13 +9,15 @@ import sys
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 
-QUERY = re.compile(r"^(?:/web(?:\s+|$)|(?:поищи|найди|проверь)\s+в\s+интернете\b[\s:,.]*|"
-                   r"(?:search|look up)\s+the\s+web\b[\s:,.]*)", re.IGNORECASE)
+QUERY = re.compile(r"^/web(?:\s+|$)", re.IGNORECASE)
 MAX_QUERY = 400
 MAX_RESULTS = 6
 HOST = "lite.duckduckgo.com"
+DASHES = str.maketrans("‐‑‒–—−", "------")
+MODEL_ID = re.compile(r"[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*")
 VERSIONED_NAME = re.compile(
-    r"\b([a-z][a-z0-9]*?)[ _-]*(\d+(?:\.\d+)+)(?:[ _-]+([a-z][a-z0-9]*))?(?!\w|\.\d)",
+    r"\b([a-z][a-z0-9]*?)[ _-]*(\d+(?:\.\d+)+)"
+    r"(?:[ _-]+([a-z][a-z0-9]*(?:-[a-z0-9]+)*))?(?!\w|\.\d|-\w)",
     re.IGNORECASE | re.ASCII,
 )
 
@@ -36,10 +38,22 @@ def authored_text(message):
 
 
 def requested_query(message):
-    """Return the literal query of an explicit search, or None."""
+    """Return the literal /web query, or None for a normal conversation."""
     text = authored_text(message)
     prefix = QUERY.match(text)
     return " ".join(text[prefix.end():].split()) if prefix else None
+
+
+def public_model(cfg):
+    """Use only the model ID, excluding the provider prefix, when explicitly public."""
+    if cfg.get("WEB_SEARCH_PUBLIC_MODEL") != "1":
+        return ""
+    model = cfg.get("MODEL", "").rpartition("/")[2]
+    return model if len(model) <= MAX_QUERY and MODEL_ID.fullmatch(model) else ""
+
+
+def model_query_key(query):
+    return re.sub(r"[ _-]+", "-", query.translate(DASHES).casefold())
 
 
 def query_from_messages(query, messages):
@@ -49,19 +63,22 @@ def query_from_messages(query, messages):
     query = " ".join(query.split())
     if not 0 < len(query) <= MAX_QUERY:
         return None
-    pattern = re.compile(r"(?<!\w)" + re.escape(query) + r"(?!\w)", re.IGNORECASE)
-    for message in messages:
-        match = pattern.search(message)
+    query = query.translate(DASHES)
+    normalized = [(message, message.translate(DASHES)) for message in messages]
+    requested = {versioned_name_key(match) for match in VERSIONED_NAME.finditer(query)}
+    boundary = r"(?!\w|\.\d|-\w)" if requested else r"(?!\w)"
+    pattern = re.compile(r"(?<!\w)" + re.escape(query) + boundary, re.IGNORECASE)
+    for message, normalized_message in normalized:
+        match = pattern.search(normalized_message)
         if match:
-            return match[0]
+            return message[match.start():match.end()]
     # Recover the complete shared versioned name, without transmitting added words
     # or accepting a different version or variant.
-    requested = {versioned_name_key(match) for match in VERSIONED_NAME.finditer(query)}
     if requested:
-        for message in messages:
-            for match in VERSIONED_NAME.finditer(message):
+        for message, normalized_message in normalized:
+            for match in VERSIONED_NAME.finditer(normalized_message):
                 if len(match[0]) <= MAX_QUERY and versioned_name_key(match) in requested:
-                    return match[0]
+                    return message[match.start():match.end()]
     return None
 
 

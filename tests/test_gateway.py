@@ -152,7 +152,8 @@ class GatewayTests(unittest.TestCase):
         self.assertIsNone(requested_query({"text": "/web forwarded", "forwarded": True}))
         self.assertIsNone(requested_query({"text": "/web quoted", "formatting": [{"type": "blockquote"}]}))
         self.assertEqual(requested_query({"text": "/web Python\n  версии"}), "Python версии")
-        self.assertEqual(requested_query({"text": "Поищи в интернете: Python версии"}), "Python версии")
+        self.assertIsNone(requested_query({"text": "Поищи в интернете — последняя версия Python"}))
+        self.assertIsNone(requested_query({"text": "Search the web for the latest Python release"}))
         parser = Results()
         parser.feed("""<a class='result-link' href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org">
                     Python &amp; docs</a><td class='result-snippet'>Stable <b>releases</b></td>
@@ -166,6 +167,11 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(query_from_messages("GPT-6.2 Sol модель OpenAI", messages), "ChatGPT 6.2 Sol")
         self.assertEqual(query_from_messages("характеристики Qwen-3.8 Flash для Codex",
                                              ("Сравни Qwen3.8 Flash с Sol.",)), "Qwen3.8 Flash")
+        self.assertEqual(query_from_messages("GPT-6.2 Sol модель OpenAI",
+                                             ("Найди GPT‑6.2 Sol.",)), "GPT‑6.2 Sol")
+        self.assertIsNone(query_from_messages("GPT 6.2", ("Найди GPT 6.2.1.",)))
+        self.assertIsNone(query_from_messages("Qwen 3.8 Flash", ("Найди Qwen 3.8 Flash-Pro.",)))
+        self.assertIsNone(query_from_messages("Qwen 3.8 Flash Alibaba", ("Найди Qwen 3.8 Flash–Pro.",)))
         self.assertIsNone(query_from_messages("GPT-6.1 Sol модель OpenAI", messages))
         self.assertIsNone(query_from_messages("GPT-6.2 Flash OpenAI", messages))
         self.assertIsNone(query_from_messages("GPT-6.2 Sol OpenAI", ("Вот ChatGPT. 6.2 Sol.",)))
@@ -196,6 +202,43 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(scope.call("search_web", {"query": "Python"})["isError"])
         self.assertFalse(scope.call("send_message", {"chat_id": 101, "message": "summary"})["isError"])
         self.assertTrue(scope.call("send_message", {"chat_id": 101, "message": "duplicate"})["isError"])
+
+    @patch("gateway.web_research.search", return_value=([{"url": "https://example.com"}], ""))
+    def test_public_model_and_comparison_use_two_distinct_queries(self, search):
+        cfg = {"OWNER_ID": "101", "MODEL": "provider/qwen3.8-flash", "WEB_SEARCH_PUBLIC_MODEL": "1"}
+        messages = ("Сравни свою модель с ChatGPT 6.2 Sol по цене.",)
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=messages)
+
+        first = scope.call("search_web", {"query": "GPT-6.2 Sol OpenAI"})
+        self.assertFalse(first["isError"])
+        self.assertEqual(scope.call("search_web", {"query": "chatgpt 6.2 sol"}), first)
+        self.assertTrue(scope.call("search_web", {"query": "Qwen3.8 Flash-Pro"})["isError"])
+        second = scope.call("search_web", {"query": "@model"})
+        self.assertFalse(second["isError"])
+        self.assertEqual(scope.call("search_web", {"query": "Qwen3.8 Flash"}), second)
+        self.assertTrue(scope.call("search_web", {"query": "по цене"})["isError"])
+        self.assertEqual([call.args for call in search.call_args_list],
+                         [("ChatGPT 6.2 Sol",), ("qwen3.8-flash",)])
+
+        cfg["MODEL"] = "other-provider/another-model"
+        scope = TelegramScope(self.upstream, 101, "owner", cfg, self.memory, web_messages=messages)
+        self.assertFalse(scope.call("search_web", {"query": "@model"})["isError"])
+        search.assert_called_with("another-model")
+
+    @patch("gateway.web_research.search")
+    def test_model_search_requires_opt_in_and_an_owner_dm(self, search):
+        cfg = {"OWNER_ID": "101", "MODEL": "provider/private-model"}
+        args = {"query": "@model"}
+        messages = ("Сравни свою модель с Python.",)
+        for options, cid, tier in (
+            (cfg, 101, "owner"),
+            (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1"), 101, "guest"),
+            (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1"), -100, "owner"),
+            (dict(cfg, WEB_SEARCH_PUBLIC_MODEL="1", MODEL="provider/not a model ID"), 101, "owner"),
+        ):
+            scope = TelegramScope(self.upstream, cid, tier, options, self.memory, web_messages=messages)
+            self.assertTrue(scope.call("search_web", args)["isError"])
+        search.assert_not_called()
 
     @patch("gateway.web_research.search")
     def test_telegram_mutation_blocks_web_lookup_and_backend_retry(self, search):

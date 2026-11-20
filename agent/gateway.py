@@ -56,7 +56,8 @@ FIND_TOOL = tool("find_telegram_tool", "Find additional Telegram tools and their
 CALL_TOOL = tool("call_telegram_tool", "Call an additional Telegram tool using its exact input schema.",
                  {"name": {"type": "string"}, "arguments": {"type": "object"}})
 WEB_SEARCH = tool("search_web", "Search the public web for current facts or sources. Use a short "
-                  "public phrase from the owner's current messages, such as a model name and version. "
+                  "public phrase copied from the owner's current messages. For the configured public "
+                  "model, use @model if the run instructions say it is available. "
                   "After searching, reply with links using send_message in this chat.",
                   {"query": {"type": "string", "maxLength": web_research.MAX_QUERY}})
 
@@ -111,6 +112,8 @@ class TelegramScope:
         self.web_blocked = False
         self.web_calls = 0
         self.web_messages = web_messages if not research and tier == "owner" and str(cid) == cfg.get("OWNER_ID") else ()
+        self.web_model = web_research.public_model(cfg) if self.web_messages else ""
+        self.web_results = {}
         self.self_id = cfg.get("SELF_ID", "")
         target = normalize(cfg.get("NOTIFY_CHAT") or "me")
         own_id = normalize(self.self_id)
@@ -152,19 +155,29 @@ class TelegramScope:
     def search_web(self, args):
         if self.web_blocked:
             return text_result("Запрос не отправлен: запускай поиск до отправки сообщения или изменения данных.", True)
+        raw_query = args.get("query")
+        query = web_research.query_from_messages(raw_query, self.web_messages)
+        if self.web_model and isinstance(raw_query, str):
+            key = web_research.model_query_key(" ".join(raw_query.split()))
+            if key in ("@model", web_research.model_query_key(self.web_model)):
+                query = self.web_model
+        if query is None:
+            return text_result("Запрос не отправлен: скопируй короткую публичную фразу целиком из "
+                               "новых сообщений владельца без перевода или добавления слов.", True)
+        key = query.casefold()
+        if key in self.web_results:
+            return self.web_results[key]
         if self.web_calls >= 2:
             return text_result("Лимит поиска: два отправленных запроса за запуск.", True)
-        query = web_research.query_from_messages(args.get("query"), self.web_messages)
-        if query is None:
-            return text_result("Запрос не отправлен: скопируй короткую публичную фразу из новых "
-                               "сообщений владельца, например название модели и номер версии.", True)
         self.research = True
         self.last_result = None
         self.web_calls += 1
         results, error = web_research.search(query)
         if error:
             return text_result(error, True)
-        return text_result(json.dumps(results, ensure_ascii=False))
+        result = text_result(json.dumps(results, ensure_ascii=False))
+        self.web_results[key] = result
+        return result
 
     def reply_to_research(self, args):
         args = guest_arguments("send_message", args, self.chat, {})

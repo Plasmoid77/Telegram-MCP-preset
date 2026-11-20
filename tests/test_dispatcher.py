@@ -128,6 +128,14 @@ class Private(Base):
             {"web_messages": ("hi",)}, {}, {}, {},
         ])
 
+    def test_natural_search_comparison_keeps_the_full_request_for_the_agent(self):
+        self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
+        text = "Поищи в интернете, чем твоя модель отличается от GPT-6.2 Sol."
+        with mock.patch.object(D, "run_agent") as run:
+            self.d.run_private(OWNER, [msg(10, 1, text=text)])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs, {"web_messages": (text,)})
+
     def test_feed_max_does_not_hide_an_earlier_lost_message(self):
         self.cur.chats[OWNER] = 100
         self.chat(OWNER, "private", msg(101, 300), msg(102, 10))
