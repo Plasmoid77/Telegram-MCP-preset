@@ -21,6 +21,8 @@ STATE_DIR = Path(os.environ.get("TG_AGENT_STATE_DIR") or _xdg("XDG_STATE_HOME", 
 CONFIG = CONFIG_DIR / "config.env"
 MEMORY = STATE_DIR / "memory.md"
 CURSORS = STATE_DIR / "cursors.json"
+RELAYS = STATE_DIR / "relays.json"        # the owner's relay rules (relay_set / relay_remove)
+RELAY_LOG = STATE_DIR / "relay_log.json"  # the last relay decisions, for relay_list
 PAUSE = STATE_DIR / "pause"          # update_mcp.py: start no new runs while it exists
 PAUSE_ACK = STATE_DIR / "pause.ack"  # written by the dispatcher while paused and idle
 
@@ -47,6 +49,8 @@ DEFAULTS = {
     "OPEN_URL": "owner",
     "OPEN_URL_PROXY_NETS": "",
     "PAGE_CHARS": "30000",
+    "RELAYS": "",
+    "RELAY_PER_HOUR": "60",
 }
 
 

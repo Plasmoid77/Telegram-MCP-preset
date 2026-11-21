@@ -4,7 +4,10 @@ Every harness (Claude Code, Codex, OpenCode, a custom runner) gets one private U
 broker and nothing else. The broker offers the tools policy.py allows for the run's scope,
 checks every call, splits long results into pages, and adds a few tools of its own:
 read_result, search_web, open_url, notify_owner (chat scope), memory_write / read_file /
-find_telegram_tool / call_telegram_tool (owner scope).
+find_telegram_tool / call_telegram_tool / relay_list / relay_set / relay_remove (owner scope).
+
+A third scope, "relay", is a decision about one message of a relay source: the model may only
+look at that message's media and answer with relay_decide; the dispatcher acts on the answer.
 """
 import base64
 import json
@@ -16,6 +19,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import policy
+import relays
 import web
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
@@ -87,6 +91,34 @@ CALL_TOOL = tool("call_telegram_tool", "Call a Telegram tool found with find_tel
                  {"name": {"type": "string"}, "arguments": {"type": "object"}})
 
 
+RELAY_MEDIA = ("open_photo", "get_media_info", "transcribe_voice", "view_video")  # no documents: unbounded parsing
+RELAY_DECIDE = tool("relay_decide", "Your decision on the message: forward it or not, why (one short line for "
+                    "the owner's log), and the comment to post under the forwarded message (empty when none "
+                    "is asked for). Call it once.",
+                    {"forward": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 300},
+                     "comment": {"type": "string", "maxLength": 3500}}, required=["forward", "reason"])
+RELAY_LIST = tool("relay_list", "Show the standing forwarding rules and the latest decisions on forwarded "
+                  "messages (what was forwarded or filtered out, and why).", {})
+RELAY_SET = tool("relay_set", "Create or change a standing rule: new messages of a source chat (a bot, "
+                 "channel, group or person) are forwarded to a target chat or forum topic. With select "
+                 "and/or comment, a model looks at every new message first: it forwards only what select "
+                 "describes and writes what comment asks under it. Without both, every message is forwarded "
+                 "as is. Omitted topic/select/comment keep their current value (topic 0 or an empty string "
+                 "clears it).",
+                 {"source": {"type": "string", "description": "@username or numeric chat id"},
+                  "target": {"type": "string", "description": "@username or numeric chat id"},
+                  "topic": {"type": "integer", "minimum": 0, "description": "forum topic id; 0 = none"},
+                  "select": {"type": "string", "maxLength": relays.MAX_INSTRUCTION,
+                             "description": "which messages to forward, in plain words"},
+                  "comment": {"type": "string", "maxLength": relays.MAX_INSTRUCTION,
+                              "description": "what to write under each forwarded message"}},
+                 required=["source", "target"])
+RELAY_REMOVE = tool("relay_remove", "Delete the forwarding rule of a source chat.",
+                    {"source": {"type": "string", "description": "@username or numeric chat id"}})
+OWNER_ONLY = ("read_file", "find_telegram_tool", "call_telegram_tool", "memory_write", "relay_list", "relay_set",
+              "relay_remove")
+
+
 def text_result(text, error=False):
     return {"content": [{"type": "text", "text": text}], "isError": error}
 
@@ -113,7 +145,7 @@ class Run:
     """What one agent run may do, and what it did."""
 
     def __init__(self, upstream, cfg, *, chat, scope, private, memory=None, files_dir=None, links="",
-                 by_owner=None):
+                 by_owner=None, message_id=None, relays=None, relay_log=None):
         self.upstream, self.cfg = upstream, cfg
         self.chat, self.scope, self.private = int(chat), scope, private
         self.memory, self.files_dir = memory, files_dir
@@ -132,7 +164,14 @@ class Run:
         self.identifiers = [x for x in (cfg.get("OWNER_ID"), cfg.get("SELF_ID"),
                                         cfg.get("OWNER_USERNAME", "").lstrip("@"), cfg.get("OWNER_NAME"))
                             if x and len(x) > 2]
+        self.relays, self.relay_log = relays, relay_log
+        self.decision = None      # relay scope: the model's relay_decide arguments
         self.upstream_tools = {t["name"]: t for t in upstream.catalog() if t["name"] not in policy.BLOCKED}
+        if scope == "relay":  # one message, its media, one decision: nothing else
+            self.message_id = int(message_id)
+            self.catalog = {n: plain(self.upstream_tools[n]) for n in RELAY_MEDIA if n in self.upstream_tools}
+            self.catalog.update({t["name"]: t for t in (READ_RESULT, RELAY_DECIDE)})
+            return
         names = policy.offered(scope, self.upstream_tools)
         if scope != "owner" and not private:
             names.discard("get_user_status")
@@ -145,6 +184,7 @@ class Run:
             own.append(OPEN_URL)
         if scope == "owner":
             own += [MEMORY_WRITE, FIND_TOOL, CALL_TOOL] + ([READ_FILE] if files_dir else [])
+            own += [RELAY_LIST, RELAY_SET, RELAY_REMOVE] if relays else []
         elif self.notify and self.notify != self.chat:
             own.append(NOTIFY_OWNER)
         self.catalog.update({t["name"]: t for t in own})
@@ -326,6 +366,125 @@ class Run:
         found = sorted((t for n, t in self.upstream_tools.items() if q in n), key=lambda t: (t["name"] != q, t["name"]))
         return self.paginate(text_result(json.dumps(found[:6], ensure_ascii=False)))
 
+    # --- relays ----------------------------------------------------------------------------
+    def relay_decide(self, args):
+        if self.decision is not None:
+            return text_result("The decision is already recorded.", True)
+        forward, reason, comment = args.get("forward"), args.get("reason"), args.get("comment", "")
+        if not isinstance(forward, bool) or not isinstance(reason, str) or not isinstance(comment, str):
+            return text_result("Give forward (true/false), reason (text) and, if asked for, comment (text).", True)
+        self.decision = {"forward": forward, "reason": reason.strip()[:300], "comment": comment.strip()[:3500]}
+        return text_result("Decision recorded. Nothing else to do.")
+
+    def relay_media(self, name, args):
+        """A media tool, only for the message being decided on."""
+        if (policy.chat_ref(args.get("chat_id")) != self.chat or args.get("message_id") != self.message_id
+                or set(args) - {"chat_id", "message_id"}):
+            return text_result(f"Only message {self.message_id} of chat {self.chat} can be looked at here.", True)
+        result = self.upstream.tool_result(name, {"chat_id": self.chat, "message_id": self.message_id}, timeout=180)
+        return self.paginate(result)
+
+    def chat_info(self, ref):
+        """(chat id, title or name) of an @username or a numeric id, as Telegram knows it, or (None, error)."""
+        if isinstance(ref, str) and ref.strip():
+            ref = ref.strip()
+            ref = int(ref) if ref.lstrip("-").isdecimal() and len(ref) <= 20 else ref
+        if not isinstance(ref, (int, str)) or isinstance(ref, bool) or ref in ("", 0):
+            return None, "Give an @username or a numeric chat id."
+        result = self.upstream.tool_result("get_chat", {"chat_id": ref}, timeout=60)
+        text = "".join(c.get("text", "") for c in result.get("content") or [] if isinstance(c, dict))
+        try:
+            data = json.loads(text) if not result.get("isError") else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("id"), int):
+            return None, f"Telegram does not know the chat {ref!r} (or this account cannot see it)."
+        return data["id"], str(data.get("title") or data.get("name") or data.get("username") or data["id"])
+
+    def relay_list(self, args):
+        self.left_chat = True  # names and reasons come from other chats: no web after this
+        rules, notes = relays.merged(self.cfg, self.relays)
+        lines = ["Rules:" if rules else "No forwarding rules."]
+        for r in rules.values():
+            where = f"{r.get('target_name') or r['target']}" + (f", topic {r['topic']}" if r.get("topic") else "")
+            lines.append(f"- {r.get('source_name') or r['source']} ({r['source']}) -> {where}"
+                         + (" [config.env: change it on the server]" if r.get("origin") == "config" else ""))
+            lines.append(f"  select: {r.get('select') or '(all)'}")
+            lines.append(f"  comment: {r.get('comment') or '(none)'}")
+            if r.get("match"):
+                lines.append(f"  only messages matching: {r['match']}")
+        lines += [f"Problem: {n}" for n in notes]
+        log = relays.read_log(self.relay_log) if self.relay_log else []
+        if log:
+            lines.append("Latest decisions (oldest first):")
+            lines += [f"- {e.get('time')} {e.get('source')}#{e.get('message_id')} "
+                      f"{'forwarded' if e.get('forwarded') else 'NOT forwarded'}: {e.get('title', '')!r} — "
+                      f"{e.get('reason', '')}" for e in log]
+        return text_result("\n".join(lines))
+
+    def relay_set(self, args):
+        source, error = self.chat_info(args.get("source"))
+        if source is None:
+            return text_result("Source: " + error, True)
+        source_name = error
+        target, target_name = self.chat_info(args.get("target"))
+        if target is None:
+            return text_result("Target: " + target_name, True)
+        topic = args.get("topic")
+        if topic is not None and (not isinstance(topic, int) or isinstance(topic, bool) or topic < 0):
+            return text_result("topic must be a forum topic id (0 = none).", True)
+        reserved = relays.RESERVED | {policy.chat_ref(self.cfg.get("OWNER_ID")), policy.chat_ref(self.cfg.get("SELF_ID"))}
+        if source == target or source in reserved:
+            return text_result("The source must be another chat than the target, than the owner's chat with "
+                               "this account and than this account itself.", True)
+        rules, error = relays.load_file(self.relays)
+        if error:
+            return text_result("relays.json is broken; fix it on the server first: " + error, True)
+        old = next((r for r in rules if r["source"] == source), {})
+        if topic is None:  # omitted: unchanged when the target is the same
+            topic = old.get("topic") if old.get("target") == target else None
+        topic = topic or None
+        rule = {"source": source, "source_name": source_name, "target": target, "target_name": target_name,
+                "topic": topic, "match": old.get("match", "")}
+        for key in ("select", "comment"):
+            value = args.get(key, old.get(key, ""))
+            if not isinstance(value, str) or len(value) > relays.MAX_INSTRUCTION:
+                return text_result(f"{key} must be text up to {relays.MAX_INSTRUCTION} characters.", True)
+            rule[key] = value.strip()
+        rules = [r for r in rules if r["source"] != source]
+        if len(rules) >= relays.MAX_RULES:
+            return text_result(f"At most {relays.MAX_RULES} rules.", True)
+        self.effects = self.left_chat = True
+        try:
+            rule = relays.clean(rule)
+        except ValueError as e:
+            return text_result(f"Invalid rule: {e}", True)
+        relays.save_file(self.relays, rules + [rule])
+        note = ""
+        if source in relays.parse_config(self.cfg.get("RELAYS", ""))[0]:
+            note = " Note: config.env has a rule for this source; it wins until it is removed on the server."
+        start = ("It keeps its progress." if old and relays.ident(old) == relays.ident(rule)
+                 else "It starts with the next new message.")
+        return text_result(f"Rule saved: {source_name} ({source}) -> {target_name}"
+                           + (f", topic {topic}" if topic else "") + f". {start}{note}")
+
+    def relay_remove(self, args):
+        self.left_chat = True
+        source, name = self.chat_info(args.get("source"))
+        rules, error = relays.load_file(self.relays)
+        if error:
+            return text_result("relays.json is broken; fix it on the server first: " + error, True)
+        ref = args.get("source")
+        if source is None and isinstance(ref, str) and ref.strip().lstrip("-").isdecimal():
+            source = int(ref.strip())
+        kept = [r for r in rules if r["source"] != source]
+        if source is None or len(kept) == len(rules):
+            return text_result("There is no rule for that source in relays.json"
+                               + (" (config.env rules are changed on the server)." if source else "."), True)
+        self.effects = True
+        relays.save_file(self.relays, kept)
+        return text_result(f"Rule removed: {name if isinstance(source, int) else source}.")
+
     # --- dispatch --------------------------------------------------------------------------
     def call(self, name, args):
         if self.closed.is_set():
@@ -336,14 +495,17 @@ class Run:
             self.calls += 1
             if name not in self.catalog:
                 return text_result("This tool is not available in this run.", True)
-            if (self.scope == "owner" and self.searched
-                    and name in ("read_file", "find_telegram_tool", "call_telegram_tool", "memory_write")):
+            if self.scope == "owner" and self.searched and name in OWNER_ONLY:
                 return text_result("After a web search this run may only work in the current chat.", True)
             if name == "read_result":
                 rid, offset = args.get("result_id"), args.get("offset")
                 if rid not in self.results or not isinstance(offset, int) or not 0 <= offset < len(self.results[rid]):
                     return text_result("Unknown result or offset.", True)
                 return self.page(rid, offset)
+            if self.scope == "relay":
+                return self.relay_decide(args) if name == "relay_decide" else self.relay_media(name, args)
+            if name in ("relay_list", "relay_set", "relay_remove"):
+                return getattr(self, name)(args)
             if name == "search_web":
                 return self.search_web(args)
             if name == "open_url":

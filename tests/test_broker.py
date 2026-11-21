@@ -253,6 +253,66 @@ class ReviewFixes(unittest.TestCase):
             s.close()
 
 
+class RelayRules(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "relays.json"
+        self.log = Path(self.tmp.name) / "relay_log.json"
+        chats = {"100": {"id": 100, "name": "Иван"}, "@avitopassbot": {"id": 8001, "name": "Авито-бот", "bot": True}, "8001": {"id": 8001, "name": "Авито-бот"},
+                 "-1009": {"id": -1009, "title": "Конклав"}}
+        self.up = FakeUpstream(answers={"get_chat": lambda a: chats.get(str(a["chat_id"])) or {
+            "content": [{"type": "text", "text": "Chat not found"}], "isError": True}})
+
+    def owner(self, cfg=CFG):
+        return run("owner", chat=OWNER, upstream=self.up, cfg=cfg, relays=self.path, relay_log=self.log)
+
+    def test_only_owner_runs_with_a_rules_file_get_the_tools(self):
+        self.assertIn("relay_set", self.owner().catalog)
+        self.assertNotIn("relay_set", run("owner", chat=OWNER).catalog)
+        self.assertNotIn("relay_set", run(relays=self.path).catalog)
+
+    def test_set_list_change_remove(self):
+        r = self.owner()
+        res = r.call("relay_set", {"source": "@avitopassbot", "target": "-1009", "topic": 68,
+                                   "select": "только объявления", "comment": "вердикт по фото"})
+        self.assertFalse(res["isError"], text(res))
+        self.assertTrue(r.left_chat and r.effects)
+        saved = json.loads(self.path.read_text())["rules"]
+        self.assertEqual((saved[0]["source"], saved[0]["target"], saved[0]["topic"], saved[0]["source_name"]),
+                         (8001, -1009, 68, "Авито-бот"))
+        res = r.call("relay_set", {"source": "8001", "target": "-1009", "comment": ""})  # topic kept
+        self.assertIn("keeps its progress", text(res))
+        saved = json.loads(self.path.read_text())["rules"]
+        self.assertEqual((len(saved), saved[0]["select"], saved[0]["comment"]), (1, "только объявления", ""))
+        broker.relays.log_decision(self.log, {"source": 8001, "message_id": 5, "title": "HDD", "forwarded": False,
+                                              "reason": "служебное"})
+        listing = text(r.call("relay_list", {}))
+        for part in ("Авито-бот", "Конклав", "topic 68", "только объявления", "NOT forwarded", "служебное"):
+            self.assertIn(part, listing)
+        self.assertFalse(r.call("relay_remove", {"source": "@avitopassbot"})["isError"])
+        self.assertEqual(json.loads(self.path.read_text())["rules"], [])
+        self.assertTrue(r.call("relay_remove", {"source": "@avitopassbot"})["isError"])
+
+    def test_refusals(self):
+        r = self.owner()
+        for args in ({"source": "@nobody", "target": "-1009"}, {"source": "8001", "target": "8001"},
+                     {"source": "100", "target": "-1009"},
+                     {"source": "200", "target": "-1009"}, {"source": "8001", "target": "-1009", "topic": -1},
+                     {"source": "8001", "target": "-1009", "select": "x" * 5000}):
+            with self.subTest(args):
+                self.assertTrue(r.call("relay_set", args)["isError"])
+        self.assertFalse(self.path.exists())
+        r.searched = True  # web text may steer the run: no standing rules from it
+        self.assertTrue(r.call("relay_set", {"source": "8001", "target": "-1009"})["isError"])
+
+    def test_config_rule_is_listed_and_noted(self):
+        cfg = dict(CFG, RELAYS="8001>-1009:68")
+        r = self.owner(cfg)
+        self.assertIn("config.env", text(r.call("relay_set", {"source": "8001", "target": "-1009"})))
+        self.assertIn("change it on the server", text(r.call("relay_list", {})))
+
+
 class OpenUrl(unittest.TestCase):
     PAGE = {"url": "https://example.com/a", "type": "text/html", "title": "Пример", "text": "Текст страницы",
             "links": [("дальше", "https://example.com/b?x=1")], "images": ["https://img.example.com/1.jpg"]}
