@@ -29,8 +29,9 @@ configuration, local speech recognition, systemd units and the guides.
 - **Memory and persona.** The owner can ask the assistant to remember instructions. The default
   persona is the Russian-speaking «Doom bot» in the manner of JARVIS; replace it with your own
   `persona.md`.
-- **Relays.** New messages of a chosen chat (say, a classifieds bot) are forwarded to a group
-  topic by the dispatcher itself, with an optional model comment on each.
+- **Relays.** "Forward what this bot sends to that topic, only real listings, with a short
+  verdict": the owner sets it up in DM; a model decides on each new message and writes the
+  comment, the dispatcher forwards and posts.
 - **Any agent CLI.** Claude Code, Codex, OpenCode or your own runner, chosen in `config.env`.
 - **Upstream updates.** A weekly timer reports new telegram-mcp releases; `update_mcp.py apply`
   upgrades with a smoke test and automatic rollback.
