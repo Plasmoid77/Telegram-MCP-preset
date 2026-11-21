@@ -6,5 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/.local/share/telegram-agent
-ExecStart=/usr/bin/python3 -I %h/.local/share/telegram-agent/update_mcp.py check
+WorkingDirectory=%h
+Environment=TG_AGENT_CONFIG_DIR=@CONFIG_DIR@
+Environment=TG_AGENT_STATE_DIR=@STATE_DIR@
+ExecStart=/usr/bin/python3 -I @AGENT_DIR@/agent/update_mcp.py check

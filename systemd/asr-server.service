@@ -1,10 +1,10 @@
 [Unit]
 Description=Local speech-to-text (onnx-asr, OpenAI-compatible, 127.0.0.1:5093) for telegram-mcp voice messages
-Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset/blob/main/docs/USAGE.md#голосовые-сообщения
+Documentation=https://github.com/Plasmoid77/Telegram-MCP-preset/blob/main/docs/OPERATIONS.md
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/asr-server
+WorkingDirectory=@AGENT_DIR@/asr
 # Any onnx-asr model name or Hugging Face repo; weights download on first use to ~/.cache/huggingface
 Environment=ASR_MODEL=gigaam-v3-e2e-rnnt
 # Empty = full precision (GigaAM-v3: 885 MB, best accuracy); int8 = 225 MB, slightly faster
@@ -14,10 +14,17 @@ Environment=ASR_THREADS=4
 # Unload the model after this many idle seconds (RAM back to ~50 MB)
 Environment=ASR_IDLE_UNLOAD=600
 Environment=HF_HUB_DISABLE_TELEMETRY=1
-ExecStart=%h/.local/share/asr-server/.venv/bin/python -I %h/.local/share/asr-server/asr_server.py
+ExecStart=@AGENT_DIR@/asr/.venv/bin/python -I @AGENT_DIR@/asr/asr_server.py
 Restart=on-failure
 RestartSec=30
 Nice=5
+# It decodes audio sent by strangers: read-only system and home, writable model cache only
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-%h/.cache/huggingface
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=default.target
