@@ -253,6 +253,102 @@ class ReviewFixes(unittest.TestCase):
             s.close()
 
 
+class OpenUrl(unittest.TestCase):
+    PAGE = {"url": "https://example.com/a", "type": "text/html", "title": "Пример", "text": "Текст страницы",
+            "links": [("дальше", "https://example.com/b?x=1")], "images": ["https://img.example.com/1.jpg"]}
+
+    def test_catalog_follows_config(self):
+        on = dict(CFG, OPEN_URL="owner")
+        self.assertIn("open_url", run("owner", chat=OWNER, cfg=on).catalog)
+        self.assertNotIn("open_url", run(cfg=on).catalog)                                      # guest DM
+        self.assertIn("open_url", run(chat=GROUP, private=False, cfg=on, by_owner=True).catalog)  # owner in a group
+        self.assertNotIn("open_url", run(chat=GROUP, private=False, cfg=on, by_owner=False).catalog)
+        self.assertIn("open_url", run(cfg=dict(CFG, OPEN_URL="all")).catalog)
+        self.assertNotIn("open_url", run("owner", chat=OWNER, cfg=dict(CFG, OPEN_URL="")).catalog)
+        self.assertNotIn("open_url", run("owner", chat=OWNER).catalog)
+
+    def owner(self, up=None, task=""):
+        return run("owner", chat=OWNER, upstream=up or FakeUpstream(), cfg=dict(CFG, OPEN_URL="owner"), links=task)
+
+    def test_only_links_the_run_has_seen(self):
+        r = self.owner(task='{"id": 5, "from": "owner", "text": "глянь www.Example.com/a/ пожалуйста"}')
+        with mock.patch("web.fetch", return_value=(self.PAGE, "")) as f:
+            for url in ("https://evil.example.net/?q=secret", "https://example.com/a?leak=1", "example.com/b"):
+                with self.subTest(url):
+                    self.assertTrue(r.call("open_url", {"url": url})["isError"])
+            f.assert_not_called()
+            res = r.call("open_url", {"url": "https://example.com/a"})
+            self.assertFalse(res["isError"])
+            self.assertEqual(f.call_args.args[0], "https://www.example.com/a/")  # the link as written, not as asked
+            self.assertIn("Текст страницы", text(res))
+            self.assertIn("- дальше: https://example.com/b?x=1", text(res))
+            self.assertFalse(r.call("open_url", {"url": "http://example.com/b?x=1"})["isError"])  # a link on the page
+            self.assertFalse(r.call("open_url", {"url": "img.example.com/1.jpg"})["isError"])     # an image on it
+            self.assertEqual(f.call_count, 3)
+
+    def test_links_from_telegram_results_and_search(self):
+        up = FakeUpstream(answers={"get_history": json.dumps({"messages": [
+            {"id": 9, "sender_id": 100, "text": "вот", "links": [{"text": "тут", "url": "https://t.example/p"}]},
+            {"id": 10, "out": True, "text": "https://bot.example/out"},
+            {"id": 11, "sender_id": 200, "text": "https://bot.example/self"}]})})
+        r = self.owner(up)
+        r.call("get_history", {"chat_id": OWNER, "limit": 5})
+        with mock.patch("web.search", return_value=([{"url": "https://s.example/r", "title": "t", "snippet": ""}], "")):
+            r.call("search_web", {"query": "something public"})
+        with mock.patch("web.fetch", return_value=(self.PAGE, "")) as f:
+            self.assertFalse(r.call("open_url", {"url": "https://t.example/p"})["isError"])
+            self.assertFalse(r.call("open_url", {"url": "https://s.example/r"})["isError"])
+            for own in ("https://bot.example/out", "https://bot.example/self"):  # the bot's own messages
+                self.assertTrue(r.call("open_url", {"url": own})["isError"])
+            self.assertEqual(f.call_count, 2)
+
+    def test_no_new_links_from_telegram_after_web_text(self):
+        up = FakeUpstream(answers={"get_history": '{"messages": [{"id": 9, "sender_id": 100, "text": "https://x.example/leak"}]}'})
+        r = self.owner(up, task="https://example.com/a")
+        with mock.patch("web.fetch", return_value=(dict(self.PAGE, text="see https://text.example/in-page"), "")) as f:
+            r.call("open_url", {"url": "https://example.com/a"})
+            r.call("get_history", {"chat_id": OWNER, "limit": 5})
+            self.assertTrue(r.call("open_url", {"url": "https://x.example/leak"})["isError"])
+            self.assertFalse(r.call("open_url", {"url": "https://text.example/in-page"})["isError"])  # in page text
+            self.assertEqual(f.call_count, 2)
+
+    def test_after_other_chats_closed_and_after_open_only_this_chat(self):
+        r = self.owner(task="https://example.com/a")
+        r.call("get_history", {"chat_id": 5})
+        with mock.patch("web.fetch") as f:
+            self.assertTrue(r.call("open_url", {"url": "https://example.com/a"})["isError"])
+            f.assert_not_called()
+        up = FakeUpstream()
+        r = self.owner(up, task="https://example.com/a")
+        with mock.patch("web.fetch", return_value=(self.PAGE, "")):
+            r.call("open_url", {"url": "https://example.com/a"})
+        self.assertTrue(r.call("get_history", {"chat_id": 5})["isError"])
+        self.assertFalse(r.call("send_message", {"chat_id": OWNER, "message": "итог"})["isError"])
+        self.assertEqual([c[0] for c in up.calls], ["send_message"])
+
+    def test_limit_errors_and_images(self):
+        r = self.owner(task="https://example.com/a https://example.com/p.png")
+        with mock.patch("web.fetch", return_value=(None, "The site answered HTTP 429.")):
+            res = r.call("open_url", {"url": "https://example.com/a"})
+        self.assertTrue(res["isError"])
+        self.assertIn("429", text(res))
+        image = {"url": "https://example.com/p.png", "type": "image/png", "image": b"PNG"}
+        with mock.patch("web.fetch", return_value=(image, "")):
+            res = r.call("open_url", {"url": "https://example.com/p.png"})
+        self.assertEqual(res["content"][1], {"type": "image", "data": "UE5H", "mimeType": "image/png"})
+        with mock.patch("web.fetch", return_value=(self.PAGE, "")):
+            for _ in range(broker.MAX_OPENS - 2):
+                r.call("open_url", {"url": "https://example.com/a"})
+            self.assertIn("Limit", text(r.call("open_url", {"url": "https://example.com/a"})))
+        self.assertEqual(r.opened, broker.MAX_OPENS)
+
+    def test_long_page_is_paged(self):
+        r = run("owner", chat=OWNER, cfg=dict(CFG, OPEN_URL="owner", PAGE_CHARS="1000"), links="example.com/a")
+        with mock.patch("web.fetch", return_value=(dict(self.PAGE, text="строка\n" * 1000), "")):
+            res = r.call("open_url", {"url": "example.com/a"})
+        self.assertIn("read_result", text(res))
+
+
 class Pages(unittest.TestCase):
     def test_long_result_is_paged_on_record_lines(self):
         records = [{"id": i, "text": "x" * 50} for i in range(400)]

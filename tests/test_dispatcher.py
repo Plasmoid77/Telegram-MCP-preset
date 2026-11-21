@@ -380,6 +380,28 @@ class Execute(Base):
         self.execute(fail, kind="guest")
         self.assertEqual(self.upstream.calls, [])
 
+    def test_open_url_only_in_runs_the_owner_started_and_task_links_are_seen(self):
+        R, seen = D.harnesses.Result, []
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            seen.append(("open_url" in tools, set(D.broker.Run.last.seen)))
+            return R(True, 0, False)
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            context = [msg(1, 9, out=True, text="бот писал https://bot.example/x"),
+                       msg(2, 8, sender=GUEST, text="гость", links=[{"text": "тут", "url": "https://g.example/p"}])]
+            for sender in (OWNER, GUEST):
+                D.execute("http://x", self.cfg, "group", GROUP,
+                          [msg(3, 1, sender=sender, text="Джарвис, глянь example.com/doc")], context)
+        self.assertEqual(seen, [(True, {"example.com/doc", "g.example/p"}), (False, set())])
+
 
 if __name__ == "__main__":
     unittest.main()
