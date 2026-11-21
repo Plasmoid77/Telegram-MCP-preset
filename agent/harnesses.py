@@ -67,6 +67,10 @@ def preflight(cfg):
         raise ValueError("Set MODEL for HARNESS=" + harness)
     limits(cfg, False)
     limits(cfg, True)
+    if harness == "opencode":
+        for key in ("OPENCODE_HEADER_TIMEOUT_MS", "OPENCODE_CHUNK_TIMEOUT_MS"):
+            if cfg.get(key) and (not cfg[key].isdecimal() or int(cfg[key]) <= 0):
+                raise ValueError(f"{key} must be a positive number of milliseconds")
     binary = shlex.split(cfg.get("HARNESS_COMMAND", ""))[:1] if harness == "command" else [executable(cfg, harness)]
     if not binary or not shutil.which(binary[0]):
         raise ValueError(f"Executable for HARNESS={harness} was not found")

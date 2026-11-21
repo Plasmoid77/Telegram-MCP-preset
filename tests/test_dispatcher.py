@@ -88,6 +88,7 @@ class Base(unittest.TestCase):
 
         self.d = D.Dispatcher(self.mcp, self.cur, run=fake_run)
         self.d.cfg = dict(self.cfg)
+        self.d.verified = True
         self.d.groups = {GROUP}
 
     def chat(self, cid, ctype, *messages):
@@ -193,6 +194,19 @@ class ReviewFixes(Base):
         self.mcp.dialogs = [{"chat_id": GUEST, "type": "User"}]
         self.d.periodic()
         self.assertEqual(set(self.d.pending), {GUEST, OWNER, GROUP})
+
+    def test_no_dispatch_until_the_account_is_confirmed(self):
+        self.d.verified = False
+        self.mcp.me = {"id": 999}
+        real = self.mcp.call
+        self.mcp.call = lambda n, a, timeout=60, raw=False: self.mcp.me if n == "get_me" else real(n, a, timeout, raw)
+        with self.assertRaises(SystemExit):
+            self.d.step()
+        self.assertEqual([c[0] for c in self.mcp.calls], [])
+        self.mcp.me = {"id": 2}
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertTrue(self.d.verified)
 
     def test_live_position_is_taken_before_the_first_scan(self):
         self.d.next_scan = 0.0

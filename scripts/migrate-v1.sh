@@ -79,6 +79,7 @@ S=$STATE_DIR
 if [[ \$($SYSTEMCTL --user is-active telegram-agent 2>/dev/null) == active ]]; then
     rm -f "\$S/pause.ack"; touch "\$S/pause"
     for _ in \$(seq 900); do [[ -e \$S/pause.ack ]] && break; sleep 1; done
+    [[ -e \$S/pause.ack ]] || { rm -f "\$S/pause"; echo "v2 is still answering (no pause.ack in 15 min): nothing changed, try again" >&2; exit 1; }
 fi
 $SYSTEMCTL --user stop telegram-agent telegram-mcp-update.timer || true
 rm -f "\$S/pause" "\$S/pause.ack"
@@ -124,12 +125,12 @@ if [[ -e $OLD/mcp.json ]] && ! grep -q '127.0.0.1:8765/mcp' "$OLD/mcp.json"; the
 fi
 
 say "6/8 keeping v1 as $BACKUP, moving $NEW into $OLD"
-phase=moving
 install -m 755 "$rollback" "$OLD/rollback.sh"
 rm -f "$rollback"
 mkdir -p "$OLD/units"
 for u in "${UNITS[@]}"; do [[ -e $UNIT_DIR/$u ]] && cp -p "$UNIT_DIR/$u" "$OLD/units/"; done
 mv "$OLD" "$BACKUP"
+phase=moving  # from here on v1 lives in $BACKUP: recovery is rollback.sh
 mv "$NEW" "$OLD"
 
 say "7/8 installing v2 from $OLD"
@@ -139,11 +140,14 @@ phase=installing
 say "8/8 restarting the services"
 phase=starting
 $SYSTEMCTL --user restart telegram-mcp asr-server
+if [[ ${TG_MIGRATE_CHECK:-1} != 0 ]]; then  # the bot starts only against a working server
+    for _ in $(seq 30); do python3 -I "$OLD/agent/dispatcher.py" --check >/dev/null 2>&1 && break; sleep 2; done
+    python3 -I "$OLD/agent/dispatcher.py" --check
+fi
 if [[ $agent_was_active == 1 ]]; then
     $SYSTEMCTL --user start telegram-agent
     sleep "${TG_MIGRATE_SETTLE:-20}"
     active telegram-agent || false  # -> on_error points at rollback.sh
-    if [[ ${TG_MIGRATE_CHECK:-1} != 0 ]]; then python3 -I "$OLD/agent/dispatcher.py" --check; fi
 fi
 if [[ $timer_was_active == 1 ]]; then $SYSTEMCTL --user start telegram-mcp-update.timer; fi
 phase=finished

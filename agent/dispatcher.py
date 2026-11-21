@@ -289,7 +289,7 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None):
                                                        max(1, deadline - time.monotonic()), retry=attempt > 1)
         except subprocess.TimeoutExpired:
             ok, rc, transient = False, "timeout", False
-        except OSError as e:  # the CLI could not be started
+        except (OSError, ValueError, KeyError) as e:  # the CLI could not be prepared or started
             if attempt == 1 and not run.calls:
                 return {"ok": False, "started": False, "error": type(e).__name__}
             ok, rc, transient = False, None, False
@@ -321,6 +321,7 @@ class Dispatcher:
         self.pending = {}   # chat id -> {"first", "last", "source"}: settling (monotonic times)
         self.humans = set()
         self.boot = self.seq = None
+        self.verified = False  # telegram-mcp confirmed logged in as SELF_ID
         self.next_scan = 0.0  # first pass right away: catches what came while we were down
         self.was_paused = False
 
@@ -467,6 +468,16 @@ class Dispatcher:
     def step(self):
         self.cfg = config.load()
         harnesses.preflight(self.cfg)
+        if not self.verified:  # never answer from an account that is not SELF_ID
+            try:
+                me = self.mcp.call("get_me", {})
+            except Exception as e:
+                log(f"telegram-mcp not reachable yet: {e}")
+                time.sleep(5)
+                return
+            if str(me.get("id")) != self.cfg["SELF_ID"]:
+                sys.exit(f"telegram-mcp is logged in as {me.get('id')}, but SELF_ID is {self.cfg['SELF_ID']}")
+            self.verified = True
         self.groups, confirmed = self.group_list.refresh(self.mcp, self.cfg)
         if confirmed:  # a group confirmed off the list loses its cursor: a re-add starts from then
             for cid in [c for c in self.cur.chats if c < 0 and c not in self.groups]:
@@ -541,13 +552,6 @@ def main():
     cfg = config.load()
     harnesses.preflight(cfg)
     log(f"telegram-agent started: harness={cfg['HARNESS']} config={config.CONFIG} state={config.STATE_DIR}")
-    try:
-        me = Mcp(cfg["MCP_URL"]).call("get_me", {})
-    except Exception as e:  # server not up yet: the loop retries
-        log(f"telegram-mcp not reachable yet: {e}")
-    else:
-        if str(me.get("id")) != cfg["SELF_ID"]:
-            sys.exit(f"{cfg['MCP_URL']} is logged in as {me.get('id')}, but SELF_ID is {cfg['SELF_ID']}")
     d = Dispatcher(Mcp(cfg["MCP_URL"]), Cursors(config.CURSORS), url=cfg["MCP_URL"])
     while True:
         d.step()

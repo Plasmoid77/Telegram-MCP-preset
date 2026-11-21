@@ -137,7 +137,8 @@ class Run(unittest.TestCase):
         good = dict(CFG, HARNESS="command", HARNESS_COMMAND=sys.executable, OWNER_ID="1", SELF_ID="2")
         harnesses.preflight(good)
         for bad in ({"OWNER_ID": "<owner_user_id>"}, {"HARNESS": "nope"}, {"MAX_TURNS": "0"},
-                    {"HARNESS_COMMAND": "/nonexistent/x"}):
+                    {"HARNESS_COMMAND": "/nonexistent/x"},
+                    {"HARNESS": "opencode", "OPENCODE_BIN": sys.executable, "OPENCODE_HEADER_TIMEOUT_MS": "20s"}):
             with self.subTest(bad), self.assertRaises(ValueError):
                 harnesses.preflight(dict(good, **bad))
 
