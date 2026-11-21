@@ -117,6 +117,29 @@ class Decode(unittest.TestCase):
         self.assertEqual(piped, b"", "fixture: too big for ffmpeg to reach the index on a pipe")
         self.assertAlmostEqual(len(asr.decode(data)) / asr.SR, 4.0, delta=0.2)
 
+    def test_voice_note_ogg_opus(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "v.ogg"
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "sine=frequency=300:duration=2", "-c:a", "libopus", str(out)], check=True)
+            data = out.read_bytes()
+        self.assertAlmostEqual(len(asr.decode(data)) / asr.SR, 2.0, delta=0.2)
+
+    def test_upload_cannot_make_ffmpeg_read_other_files(self):
+        """A playlist naming another file on disk must not be followed (control: it works unrestricted)."""
+        with tempfile.TemporaryDirectory() as d:
+            secret = Path(d) / "secret.wav"
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "sine=frequency=500:duration=1", str(secret)], check=True)
+            playlist = f"ffconcat version 1.0\nfile '{secret}'\n".encode()
+            lst = Path(d) / "x.bin"
+            lst.write_bytes(playlist)
+            control = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "quiet", "-safe", "0", "-i", str(lst),
+                                      "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"], capture_output=True).stdout
+            self.assertGreater(len(control), 1000, "control: unrestricted ffmpeg follows the playlist")
+        with self.assertRaises((asr.NoAudio, subprocess.CalledProcessError)):
+            asr.decode(playlist)
+
     def test_video_without_sound_is_a_decode_error(self):
         data = self.make("-f", "lavfi", "-i", "color=size=64x64:duration=1", "-c:v", "libx264")
         with self.assertRaises((asr.NoAudio, subprocess.CalledProcessError)):

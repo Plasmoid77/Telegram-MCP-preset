@@ -26,10 +26,17 @@ IDLE_UNLOAD = int(os.environ.get("ASR_IDLE_UNLOAD", "600"))
 MAX_BYTES = int(float(os.environ.get("ASR_MAX_MB", "25")) * 1048576)
 MAX_SECONDS = int(os.environ.get("ASR_MAX_SECONDS", "600"))  # longer audio is cut (bounds RAM/CPU)
 DECODE_TIMEOUT = 120
+READ_TIMEOUT = 30        # s to receive a request body
+QUEUE = 6                # requests read and waiting at once (telegram-mcp prefetches up to 5)
+# ffmpeg may only read the uploaded file itself, as one of the containers voice and video notes
+# come in: no other protocols (no reading other files or URLs through playlists and the like).
+FFMPEG_INPUT = ["-protocol_whitelist", "file",
+                "-format_whitelist", "ogg,matroska,webm,mov,mp4,m4a,3gp,mp3,wav,flac,aac"]
 SHORT_S = 20.0           # up to this length the model takes the audio in one pass
 SR = 16000
 
 _lock = threading.Lock()  # one decode + recognition at a time (CPU and RAM bound)
+_queue = threading.BoundedSemaphore(QUEUE)  # bounds bodies held in memory while waiting
 _state = {"asr": None, "vad": None, "last": 0.0}
 
 
@@ -76,7 +83,7 @@ def decode(data):
     with tempfile.NamedTemporaryFile(prefix="asr-", suffix=".bin") as f:
         f.write(data)
         f.flush()
-        raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", f.name, "-vn",
+        raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", *FFMPEG_INPUT, "-i", f.name, "-vn",
                               "-t", str(MAX_SECONDS), "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"],
                              capture_output=True, check=True, timeout=DECODE_TIMEOUT).stdout
     if len(raw) < 2:
@@ -127,7 +134,21 @@ class Handler(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length") or 0)
         if not 0 < size <= MAX_BYTES + 65536:
             return self._json(413, {"error": {"message": f"body must be 1..{MAX_BYTES} bytes"}})
-        body = self.rfile.read(size)
+        if not _queue.acquire(timeout=DECODE_TIMEOUT):
+            return self._json(503, {"error": {"message": "busy, try again"}})
+        try:
+            self._transcription(size)
+        finally:
+            _queue.release()
+
+    def _transcription(self, size):
+        self.connection.settimeout(READ_TIMEOUT)
+        try:
+            body = self.rfile.read(size)
+        except TimeoutError:
+            return self._json(408, {"error": {"message": "request body too slow"}})
+        if len(body) != size:
+            return self._json(400, {"error": {"message": "incomplete body"}})
         msg = BytesParser(policy=HTTP).parsebytes(
             b"Content-Type: " + self.headers.get("Content-Type", "").encode() + b"\r\n\r\n" + body)
         parts = {p.get_param("name", header="content-disposition"): p for p in msg.iter_parts()} \

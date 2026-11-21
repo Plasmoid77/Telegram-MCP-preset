@@ -12,7 +12,7 @@ spec = importlib.util.spec_from_file_location("update_mcp", AGENT / "update_mcp.
 U = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(U)
 
-CFG = {"OWNER_ID": "1", "SELF_ID": "2", "NOTIFY_CHAT": "1"}
+CFG = {"OWNER_ID": "1", "SELF_ID": "2", "NOTIFY_CHAT": "1", "MCP_URL": "http://127.0.0.1:9/mcp"}
 
 
 def run(cwd, *cmd):
@@ -62,8 +62,8 @@ class Repo(unittest.TestCase):
         patches = [mock.patch.object(U, "MCP_DIR", live),
                    mock.patch.object(U, "STATE", t / "state/mcp_update.json"),
                    mock.patch.object(U, "LOCK", t / "state/mcp_update.lock"),
-                   mock.patch.object(U.D, "PAUSE", t / "pause"),
-                   mock.patch.object(U.D, "PAUSE_ACK", t / "pause.ack"),
+                   mock.patch.object(U.config, "PAUSE", t / "pause"),
+                   mock.patch.object(U.config, "PAUSE_ACK", t / "pause.ack"),
                    mock.patch.object(U, "log", lambda *a: None)]
         for p in patches:
             p.start()
@@ -135,7 +135,7 @@ class Apply(Repo):
             p = mock.patch.object(U, name, f)
             p.start()
             self.addCleanup(p.stop)
-        for p in (mock.patch.object(U.D, "load_config", lambda: CFG), mock.patch.object(U.time, "sleep")):
+        for p in (mock.patch.object(U.config, "load", lambda: CFG), mock.patch.object(U.time, "sleep")):
             p.start()
             self.addCleanup(p.stop)
 
@@ -178,9 +178,14 @@ class Apply(Repo):
 
     def test_pause_is_lifted_afterwards(self):
         self.fake(fail_on="v1.1.0")
-        U.D.PAUSE.touch()
         U.apply(assume_yes=True)
-        self.assertFalse(U.D.PAUSE.exists())
+        self.assertFalse(U.config.PAUSE.exists())
+
+    def test_an_operators_pause_is_kept(self):
+        self.fake()
+        U.config.PAUSE.touch()
+        U.apply(assume_yes=True)
+        self.assertTrue(U.config.PAUSE.exists())
 
     def test_unknown_tag(self):
         self.fake()
