@@ -267,6 +267,11 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None):
     """Run the agent once (and once more after a failure that changed nothing). Returns a summary."""
     owner = kind == "owner"
     scope = "owner" if owner else "chat"
+    by_owner = owner or bool(new) and all(str(m.get("sender_id")) == cfg.get("OWNER_ID") for m in new)
+    links = "\n".join(  # what open_url may open: links in people's messages, never in the bot's own
+        "\n".join([m["text"] if isinstance(m.get("text"), str) else ""]
+                  + [x["url"] for x in m.get("links") or [] if isinstance(x, dict) and isinstance(x.get("url"), str)])
+        for m in list(context) + list(new) if not m.get("out") and str(m.get("sender_id")) != cfg.get("SELF_ID"))
     try:  # a broken prompt file or limit must not consume the burst
         _, timeout = harnesses.limits(cfg, owner)
         text, prompt = task(kind, cid, new, context, cfg, who), instructions(cfg, kind)
@@ -277,7 +282,8 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None):
         attempt += 1
         try:  # nothing has reached Telegram yet if this fails: the caller may retry the burst
             run = broker.Run(Mcp(upstream_url), cfg, chat=cid, scope=scope, private=kind != "group",
-                             memory=config.MEMORY, files_dir=cfg.get("FILES_DIR") if owner else None)
+                             memory=config.MEMORY, files_dir=cfg.get("FILES_DIR") if owner else None,
+                             links=links, by_owner=by_owner)
         except Exception as e:
             if attempt == 1:
                 return {"ok": False, "started": False, "error": type(e).__name__}
@@ -294,10 +300,10 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None):
                 return {"ok": False, "started": False, "error": type(e).__name__}
             ok, rc, transient = False, None, False
         summary = {"ok": ok, "rc": rc, "attempt": attempt, "sent": run.sent, "calls": run.calls,
-                   "effects": run.effects, "searches": run.searches, "s": round(time.monotonic() - t0)}
+                   "effects": run.effects, "searches": run.searches, "opened": run.fetched, "s": round(time.monotonic() - t0)}
         if err and not ok:
             summary["stderr"] = repr(err[-200:])
-        if (ok or attempt > 1 or run.effects or run.searches or not (transient or run.calls == 0)
+        if (ok or attempt > 1 or run.effects or run.searches or run.fetched or not (transient or run.calls == 0)
                 or deadline - time.monotonic() < 30 or paused()):
             break
         log(f"chat={cid} {kind}: run failed before doing anything, retrying once")

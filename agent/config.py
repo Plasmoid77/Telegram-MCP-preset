@@ -44,6 +44,8 @@ DEFAULTS = {
     "GROUPS_FOLDER": "",
     "GROUP_TRIGGERS": "",
     "WEB_SEARCH": "duckduckgo",
+    "OPEN_URL": "owner",
+    "OPEN_URL_PROXY_NETS": "",
     "PAGE_CHARS": "30000",
 }
 

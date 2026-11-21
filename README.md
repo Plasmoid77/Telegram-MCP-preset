@@ -24,7 +24,8 @@ configuration, local speech recognition, systemd units and the guides.
   notify the owner. The limit is enforced in code, not only in the prompt.
 - **Rich media and the web.** Voice messages and video notes are transcribed locally (onnx-asr,
   GigaAM-v3 by default); photos, documents and videos can be inspected; public web search
-  (DuckDuckGo, no key) works in every run.
+  (DuckDuckGo, no key) works in every run, and runs the owner started can open web links
+  (pages and images; public addresses only, only links already seen in the conversation).
 - **Memory and persona.** The owner can ask the assistant to remember instructions. The default
   persona is the Russian-speaking «Doom bot» in the manner of JARVIS; replace it with your own
   `persona.md`.
