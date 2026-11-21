@@ -3,6 +3,10 @@
 Полная установка на Linux с systemd: ноутбук, ПК или домашний сервер. Пути даны для текущего
 пользователя (`~`), установщик работает без root. Права администратора нужны для системных пакетов и `linger` на сервере.
 
+В v2 код пресета живёт в git-чекауте (по умолчанию `~/.local/share/telegram-agent`), настройки —
+в `~/.config/telegram-agent/`, состояние и память — в `~/.local/state/telegram-agent/`. Подробнее
+об устройстве — в [DESIGN.md](DESIGN.md).
+
 ## 0. Что понадобится
 
 | Что | Зачем |
@@ -12,7 +16,7 @@
 | `api_id` / `api_hash` | приложение на [my.telegram.org](https://my.telegram.org/apps): Platform — Desktop, short name без дефиса. Можно создать на любом своём аккаунте |
 | Linux с systemd, Python ≥ 3.10, `git`, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), `ffmpeg` | сервер, диспетчер, расшифровка голосовых |
 | ~1.5 ГБ на диске сверх telegram-mcp | `asr-server`: окружение 160 МБ + модель GigaAM-v3 885 МБ (скачивается при первом голосовом; `int8` — 225 МБ) |
-| Claude Code, Codex или OpenCode с рабочей авторизацией | агент, который отвечает. См. [варианты настройки](HARNESSES.md) |
+| Claude Code, Codex или OpenCode с рабочей авторизацией | агент, который отвечает. См. [DESIGN.md](DESIGN.md#агенты-harness) |
 | Телефон с Telegram аккаунта-бота | войти по QR-коду |
 
 Правило для всей установки: **секреты (`api_hash`, строка сессии, файл `*.session`, ключи API)
@@ -20,13 +24,16 @@
 
 ## 1. Скачать пресет и запустить установщик
 
+Клонируйте пресет сразу в каталог, где он останется жить: юниты указывают на этот чекаут,
+поэтому обновление пресета — это `git checkout` нового тега плюс перезапуск.
+
 На Debian, Ubuntu или LMDE системные зависимости можно поставить командой
 `sudo apt install git python3 ffmpeg`. Установите [uv](https://docs.astral.sh/uv/getting-started/installation/)
 и проверьте, что `uv --version` работает из вашего терминала.
 
 ```bash
-git clone https://github.com/Plasmoid77/Telegram-MCP-preset ~/Telegram-MCP-preset
-cd ~/Telegram-MCP-preset
+git clone https://github.com/Plasmoid77/Telegram-MCP-preset ~/.local/share/telegram-agent
+cd ~/.local/share/telegram-agent
 ./install.sh
 ```
 
@@ -36,18 +43,16 @@ cd ~/Telegram-MCP-preset
    тег `v3.3.23` (другой: `TELEGRAM_MCP_REF=vX.Y.Z ./install.sh`) и выполняет `uv sync`.
    **Только из git:** пакет `telegram-mcp` на PyPI — чужой проект с тем же именем.
 2. Создаёт `~/.local/share/telegram-mcp/.env` (600) из `server/env.example`.
-3. Создаёт папку `~/TelegramMCP` (700). Это единственная папка, с которой работают файловые
+3. Создаёт `~/.config/telegram-agent/` (700) с `config.env` и `backend.env` (600) из шаблонов,
+   если их ещё нет, и `~/.local/state/telegram-agent/` (700).
+4. Создаёт папку `~/TelegramMCP` (700). Это единственная папка, с которой работают файловые
    инструменты MCP.
-4. Ставит автоответчик в `~/.local/share/telegram-agent/`:
-   - код: `dispatcher.py`, `gateway.py`, `harnesses.py`, `guard.py`, `reflow.py`, `settings.json`, `mcp.json`;
-   - если их ещё нет — `prompt.md`, `config.env` (600) и `backend.env` (600).
-5. Ставит `asr-server` (локальная расшифровка голосовых, onnx-asr) в
-   `~/.local/share/asr-server/` по зафиксированному `asr/uv.lock`.
-6. Кладёт юниты в `~/.config/systemd/user/` и выполняет `daemon-reload`.
+5. Готовит окружение `asr-server` (`asr/uv.lock`, `uv sync --frozen`), каталог
+   `~/.cache/huggingface` и проверяет `ffmpeg`.
+6. Кладёт юниты в `~/.config/systemd/user/`, подставив путь чекаута, и выполняет `daemon-reload`.
 
-Сервисы установщик не запускает и не перезапускает. Повторный запуск безопасен: код обновляется,
-прежняя версия файла сохраняется в `telegram-agent/state/*.bak-<время>`. Ваши `.env`,
-`config.env`, `prompt.md`, `memory.md` и `backend.env` не трогаются.
+Сервисы установщик не запускает и не перезапускает. Повторный запуск безопасен: шаблоны
+`config.env` и `backend.env` создаются один раз и не перезаписываются, секреты не трогаются.
 
 ## 2. Секреты сервера
 
@@ -105,20 +110,20 @@ systemctl --user is-active asr-server telegram-mcp
 
 Подключите клиент по шагу 8 и вызовите `get_me`, чтобы подтвердить вход в нужный аккаунт.
 
-Настройки сервера лежат в юните. Что выбрано и почему — в [PRESET.md](PRESET.md#1-настройки-сервера):
+Настройки сервера лежат в юните. Что выбрано и почему — в [DESIGN.md](DESIGN.md):
 
 ```
 MCP_TRANSPORT=http  MCP_HOST=127.0.0.1  MCP_PORT=8765
 TELEGRAM_EXPOSED_TOOLS=all
 TELEGRAM_ALLOWED_ROOTS=%h/TelegramMCP  TELEGRAM_SERVER_ROOTS_ONLY=1
-TELEGRAM_EVENT_FEED=1
+TELEGRAM_CATCH_UP_INTERVAL=120
 TELEGRAM_TRANSCRIBE=auto  TELEGRAM_TRANSCRIBE_ENGINE=openai
 TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LANGUAGE=ru
 ```
 
 ## 6. Настроить автоответчик
 
-Файл `~/.local/share/telegram-agent/config.env`: замените все `<…>`.
+Файл `~/.config/telegram-agent/config.env`: замените все `<…>`.
 
 | Ключ | Что вписать |
 |---|---|
@@ -131,9 +136,11 @@ TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LAN
 | `GROUP_TRIGGERS` | слова-обращения в группах, через запятую. Впишите и имя аккаунта |
 | `HARNESS`, `MODEL` | бэкенд и модель по шагу 7 |
 
-Остальные ключи описаны в [USAGE.md](USAGE.md#configenv). Файл перечитывается на лету.
+Остальные ключи описаны в [OPERATIONS.md](OPERATIONS.md#configenv). Файл перечитывается на лету.
 
-Характер бота задаёт `prompt.md`. `{{KEY}}` в нём подставляются из `config.env`.
+Характер и правила бота задают промпты в `agent/prompts/` (`persona.md`, `base.md`, `owner.md`,
+`guest.md`, `group.md`); `{{KEY}}` в них подставляются из `config.env`. Чтобы заменить персону,
+положите рядом с `config.env` свой `persona.md` — он перекроет шаблон.
 
 ## 7. Установить и авторизовать агент
 
@@ -146,11 +153,13 @@ TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LAN
 | [OpenCode](https://opencode.ai/docs/) | Установить CLI v2.3.2 или новее. В `opencode` выполнить `/connect`, выбрать провайдера, проверить модели через `/models` | `HARNESS=opencode`, например `MODEL=opencode-go/qwen3.7-plus` |
 
 Идентификаторы моделей в таблице — примеры. Выберите доступную модель своего провайдера.
-В [HARNESSES.md](HARNESSES.md) описаны дополнительные настройки и формат внешнего раннера.
+Для `HARNESS=claude` `MODEL` можно оставить пустым (берётся модель Claude Code); для остальных
+бэкендов он обязателен. В [DESIGN.md](DESIGN.md#агенты-harness) описаны дополнительные настройки,
+изоляция и формат внешнего раннера (`HARNESS=command`).
 
 ### Сменить модель автоответчика OpenCode
 
-На компьютере, где работает `telegram-agent`, откройте `~/.local/share/telegram-agent/config.env`.
+На компьютере, где работает `telegram-agent`, откройте `~/.config/telegram-agent/config.env`.
 При `HARNESS=opencode` задайте в `MODEL` полный идентификатор модели, например
 `MODEL=opencode-go/qwen3.7-plus`. Список моделей Go можно посмотреть в терминале.
 
@@ -158,9 +167,9 @@ TELEGRAM_TRANSCRIBE_OPENAI_URL=http://127.0.0.1:5093/v1  TELEGRAM_TRANSCRIBE_LAN
 opencode models | grep '^opencode-go/'
 ```
 
-Если `opencode` установлен вне `PATH`, используйте полный путь, например
-`~/.opencode/bin/opencode`. После сохранения файла новая модель применяется со следующего запуска
-автоответчика. Перезапуск службы не нужен.
+Если `opencode` установлен вне `PATH`, используйте полный путь через `OPENCODE_BIN`, например
+`OPENCODE_BIN=~/.opencode/bin/opencode`. После сохранения файла новая модель применяется со
+следующего запуска автоответчика. Перезапуск службы не нужен.
 
 Команда `/models` выбирает модель интерактивной сессии OpenCode. Автоответчик при каждом запуске
 передаёт собственное значение `MODEL` из `config.env`.
@@ -189,17 +198,18 @@ opencode mcp list
 ```
 
 Клиент владельца получает доступ ко всему аккаунту. Оставьте адрес на loopback. Автоответчик
-подключается отдельно согласно выбранному `HARNESS`.
+подключается отдельно, через свой per-run брокер, согласно выбранному `HARNESS`.
 
 ## 9. Запустить автоответчик
 
 ```bash
+python3 -I ~/.local/share/telegram-agent/agent/dispatcher.py --check   # должно вывести CHECK OK
 systemctl --user enable --now telegram-agent
 journalctl --user -u telegram-agent -f
 ```
 
 Проверка новых релизов telegram-mcp раз в неделю. Она только сообщает (журнал и сообщение в
-`NOTIFY_CHAT`), а обновление запускается вручную (`docs/USAGE.md`, «Обслуживание»):
+`NOTIFY_CHAT`), а обновление запускается вручную ([OPERATIONS.md](OPERATIONS.md), «Обслуживание»):
 
 ```bash
 systemctl --user enable --now telegram-mcp-update.timer
@@ -224,17 +234,59 @@ sudo loginctl enable-linger "$USER"
 ## 11. Проверка
 
 1. Напишите боту в личку со своего аккаунта: «привет, что умеешь?». В журнале появится
-   `tier=owner rc=0 error=False`, и придёт ответ.
-2. Попросите кого-нибудь написать боту. В журнале будет `tier=guest`.
+   `chat=<id> owner harness=… ok=True rc=0 …`, и придёт ответ.
+2. Попросите кого-нибудь написать боту. В журнале будет `chat=<id> guest …`.
 3. Добавьте бота в группу и напишите ему в личку: «разрешаю тебе писать в группе <название>».
    - Бот ответит итоговым списком групп.
    - В журнале появится `groups folder '…': [id]`.
    - В группе напишите «<слово из GROUP_TRIGGERS>, проверка». Ответ придёт reply через ~10 с.
-4. «Запомни: …» — бот скажет, что записал. Проверка: `cat ~/.local/share/telegram-agent/memory.md`.
+4. «Запомни: …» — бот скажет, что записал. Проверка: `cat ~/.local/state/telegram-agent/memory.md`.
 5. Голосовое боту длиннее минуты. Ответ по смыслу, в журнале `asr-server` будет строка
    `NN.Ns audio -> NNN chars`.
 6. Большая задача, например «сколько сообщений в топике <тема> группы <группа>?». Должна пройти
-   без жалоб на размер.
+   без жалоб на размер (длинные результаты читаются по страницам через `read_result`).
+
+## Переход с v1
+
+Скрипт `scripts/migrate-v1.sh` переносит установку v1 (файлы, скопированные в
+`~/.local/share/telegram-agent`) на раскладку v2. Бот не работает только между шагами 4 и 8,
+около минуты; ничего не удаляется.
+
+```bash
+git clone -b <тег> https://github.com/Plasmoid77/Telegram-MCP-preset ~/.local/share/telegram-agent.new
+~/.local/share/telegram-agent.new/scripts/migrate-v1.sh
+```
+
+Что делает скрипт по шагам:
+
+1. проверяет ваш `config.env` новой версией (`dispatcher.py --check`: агент, модель, вход в
+   telegram-mcp); при ошибке ничего не меняет;
+2. готовит окружение `asr-server` в новом чекауте, пока бот ещё работает;
+3. пишет `rollback.sh` и останавливает еженедельную проверку релизов (во время
+   `update_mcp.py apply` скрипт не запускается);
+4. ставит бота на паузу (ждёт конца текущего ответа) и останавливает его; если пауза не
+   подтвердилась за 15 мин — возвращает всё как было;
+5. копирует настройки в `~/.config/telegram-agent/`, состояние и память — в
+   `~/.local/state/telegram-agent/`;
+6. сохраняет старый каталог и юниты как `~/.local/share/telegram-agent.v1-<время>` (внутри —
+   `rollback.sh`), переносит новый чекаут в `~/.local/share/telegram-agent`;
+7. запускает `install.sh` (юниты теперь указывают на чекаут);
+8. перезапускает `telegram-mcp` (его юнит изменился) и `asr-server`, запускает бота и таймер и
+   проверяет, что бот не упал за первые 20 с.
+
+Старый `prompt.md` сохраняется в `~/.config/telegram-agent/prompt.v1.md` для справки — v2 читает
+промпты из `agent/prompts/`. Откат: `~/.local/share/telegram-agent.v1-<время>/rollback.sh` — он
+дожидается конца текущего ответа v2 и переносит в v1 курсоры чатов и память, чтобы ничего не
+ответилось дважды и не забылось.
+
+Из v1 в v2 убраны `guard.py`, `reflow.py` и хуки `settings.json`, открытые followup-поручения,
+лента входящих (`TELEGRAM_EVENT_FEED`), `RESTART_STALLED_MCP`, Firecrawl, команда `/web`,
+`WEB_SEARCH_PUBLIC_MODEL` и `OWNER_MCP_OUTPUT_TOKENS` — их роли теперь закрывают `broker.py`,
+курсоры и история чата, а также встроенный `search_web`. Если v1 указывал на другой адрес MCP
+(`mcp.json`), пропишите его в `MCP_URL` в `config.env`.
+
+После миграции проверьте: личку владельца, личку гостя, обращение в группе, голосовое и
+«запомни …». Следите за `journalctl --user -u telegram-agent -f`.
 
 ## Перенос на другую машину
 
@@ -242,8 +294,8 @@ sudo loginctl enable-linger "$USER"
 2. На новой: шаг 1 (`install.sh`).
 3. Перенесите на новую машину безопасным способом (не через чат с ИИ):
    - `~/.local/share/telegram-mcp/.env` и `telegram_mcp_session.session`;
-   - `~/.local/share/telegram-agent/config.env`, `memory.md`, `prompt.md` (если меняли) и
-     `backend.env`.
+   - `~/.config/telegram-agent/config.env`, `backend.env` и `persona.md` (если меняли);
+   - `~/.local/state/telegram-agent/memory.md`.
 4. Если сменились пользователь или путь, поправьте `TELEGRAM_SESSION_NAME` в `.env`. Остальные
    пути вычисляются сами.
 5. Шаги 5, 7, 9, 10, 11. Модель распознавания скачается заново при первом голосовом.
@@ -253,8 +305,8 @@ sudo loginctl enable-linger "$USER"
 
 ## Удаление
 
-Остановите автоответчик после завершения текущего запроса. На компьютере, где он установлен,
-выполните:
+Остановите автоответчик после завершения текущего запроса (поставьте паузу и дождитесь
+`pause.ack`, см. [OPERATIONS.md](OPERATIONS.md#команды)), затем выполните:
 
 ```bash
 systemctl --user disable --now telegram-mcp-update.timer
@@ -271,14 +323,15 @@ systemctl --user daemon-reload
 `telegram` из MCP-конфигов, в которые добавляли её через шаг 8.
 
 Остановка сохраняет конфигурацию и данные. Если они больше не нужны, удалите их отдельно.
-Следующие команды удалят сессию, ключи, память, настройки и ленту событий. Сохраните нужные
-экспорты и резервные копии заранее.
+Следующие команды удалят код, сессию, ключи, память и настройки. Сохраните нужные экспорты и
+резервные копии заранее.
 
 ```bash
-rm -r -- ~/.local/share/telegram-agent ~/.local/share/telegram-mcp ~/.local/share/asr-server
-rm -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/telegram-mcp"
+rm -r -- ~/.local/share/telegram-agent ~/.local/share/telegram-mcp
+rm -r -- "${XDG_CONFIG_HOME:-$HOME/.config}/telegram-agent"
+rm -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/telegram-agent" "${XDG_STATE_HOME:-$HOME/.local/state}/telegram-mcp"
 ```
 
-Каталог с исходниками и `~/TelegramMCP` с экспортами удалите при необходимости. `linger`
-можно выключить через `sudo loginctl disable-linger "$USER"`, если он был включён только для
-пресета.
+Каталог `~/TelegramMCP` с экспортами и `~/.cache/huggingface` (веса модели распознавания) удалите
+при необходимости. `linger` можно выключить через `sudo loginctl disable-linger "$USER"`, если он
+был включён только для пресета.
