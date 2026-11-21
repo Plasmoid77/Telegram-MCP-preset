@@ -1,21 +1,22 @@
-"""Tests for the dispatcher's history-based delivery (stdlib only, fake MCP server).
-
-Run: python3 -m unittest discover -s tests -v
-"""
-import importlib.util, json, os, tempfile, time, unittest
+"""dispatcher.py: history-based delivery, scopes, limits, prompts. Fake MCP, no network."""
+import json
+import sys
+import tempfile
+import time
+import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-AGENT = Path(__file__).resolve().parent.parent / "agent"
-spec = importlib.util.spec_from_file_location("dispatcher", AGENT / "dispatcher.py")
-D = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(D)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import helpers  # noqa: E402,F401
+import config  # noqa: E402
+import dispatcher as D  # noqa: E402
 
 OWNER, SELF, GUEST, GROUP, BOT = 1, 2, 3, -100, 4
-CFG = {"OWNER_ID": "1", "SELF_ID": "2", "MAX_AGE": "1800", "GROUP_TRIGGERS": "Джарвис",
-       "PER_CHAT_PER_HOUR": "20", "TOTAL_PER_HOUR": "80", "RECONCILE_CHATS": "15",
-       "RECONCILE_INTERVAL": "180", "RESTART_STALLED_MCP": "1"}
+CFG = dict(config.DEFAULTS, OWNER_ID="1", SELF_ID="2", GROUP_TRIGGERS="Джарвис", HARNESS="command",
+           OWNER_NAME="Иван", OWNER_USERNAME="@owner_x", BOT_NAME="Doom", ACCOUNT_NAME="BotAccount",
+           GROUPS=str(GROUP))
 
 
 def msg(i, age, out=False, text="hi", sender=OWNER, **kw):
@@ -26,385 +27,359 @@ def msg(i, age, out=False, text="hi", sender=OWNER, **kw):
 
 class FakeMcp:
     def __init__(self):
-        self.chats = {}   # chat id -> {"type": chat_type, "messages": [...]}
-        self.bots = set()
-        self.dialogs = []  # list_chats records, newest first
-        self.events, self.calls = [], []
+        self.chats, self.bots, self.dialogs, self.events, self.calls = {}, set(), [], [], []
+        self.folders = None  # None: list_folders fails
 
     def call(self, name, args, timeout=60, raw=False):
-        self.calls.append(name)
+        self.calls.append((name, args))
         if name == "get_messages_after":
             c = self.chats[args["chat_id"]]
             ms = sorted(c["messages"], key=lambda m: m["id"])
             if args.get("after_id") is None:
-                page = ms[-args["limit"]:]
-                more = len(ms) > len(page)
+                page, more = ms[-args["limit"]:], len(ms) > args["limit"]
             else:
                 rest = [m for m in ms if m["id"] > args["after_id"]]
                 page, more = rest[:args["limit"]], len(rest) > args["limit"]
             return {"chat_id": args["chat_id"], "chat_type": c["type"], "has_more": more, "messages": page}
         if name == "get_message_context":
-            chat = self.chats.get(args["chat_id"], {"messages": []})
-            return {"chat_id": args["chat_id"], "results": chat["messages"]}
+            return {"chat_id": args["chat_id"], "results": self.chats.get(args["chat_id"], {"messages": []})["messages"]}
         if name == "list_chats":
             return json.dumps({"results": self.dialogs})
         if name == "get_chat":
-            return {"results": [], "bot": args["chat_id"] in self.bots}
+            return {"bot": args["chat_id"] in self.bots}
         if name == "wait_for_events":
             evs, self.events = self.events, []
             return {"boot": "b", "last_seq": 10, "events": evs}
+        if name == "list_folders":
+            if self.folders is None:
+                raise RuntimeError("down")
+            return json.dumps({"folders": [{"id": 1, "title": "Папка"}]})
+        if name == "get_folder":
+            return {"included_chats": [{"id": g, "type": "Supergroup"} for g in self.folders]}
         raise AssertionError(name)
-
-
-class OpenCodeRetry(unittest.TestCase):
-    def test_header_timeout_retries_with_remaining_budget_and_fresh_gateway(self):
-        cfg = dict(CFG, HARNESS="opencode", MODEL="opencode-go/test", MAX_TURNS="5", RUN_TIMEOUT="30")
-        upstream = mock.Mock()
-        upstream.catalog.return_value = []
-        failed = D.harnesses.RunResult(1, True, True)
-        passed = D.harnesses.RunResult(0, False, False)
-        with mock.patch.object(D, "Mcp", return_value=upstream), \
-             mock.patch.object(D, "system_prompt", return_value="prompt"), \
-             mock.patch.object(D.harnesses, "run", side_effect=[failed, passed]) as run:
-            D.run_agent(OWNER, "test", "owner", cfg)
-        first, second = run.call_args_list
-        self.assertNotEqual(first.args[4], second.args[4])
-        self.assertEqual(second.args[0]["OPENCODE_HEADER_TIMEOUT_MS"], "300000")
-        self.assertTrue(0 < second.kwargs["time_left"] < 30)
-        upstream.tool_result.assert_not_called()
-
-    def test_failure_notice_is_suppressed_after_an_ambiguous_write(self):
-        cfg = dict(CFG, HARNESS="opencode", MODEL="opencode-go/test", MAX_TURNS="5", RUN_TIMEOUT="30")
-        upstream = mock.Mock()
-        upstream.catalog.return_value = []
-        failed = D.harnesses.RunResult(1, True, True)
-        with mock.patch.object(D, "Mcp", return_value=upstream), \
-             mock.patch.object(D, "system_prompt", return_value="prompt"), \
-             mock.patch.object(D.harnesses, "run", return_value=failed) as run, \
-             mock.patch.object(D.gateway.TelegramScope, "no_effects_attempted", return_value=False):
-            D.run_agent(OWNER, "test", "owner", cfg)
-        run.assert_called_once()
-        upstream.tool_result.assert_not_called()
 
 
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        for name, value in (("PAUSE", t / "pause"), ("PAUSE_ACK", t / "pause.ack"), ("MEMORY", t / "memory.md"),
+                            ("CONFIG_DIR", t / "conf")):
+            p = mock.patch.object(config, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.cfg = dict(CFG)
+        patches = [mock.patch.object(D, "log", lambda *a: None),
+                   mock.patch.object(config, "load", lambda: dict(self.cfg)),
+                   mock.patch.object(D.harnesses, "preflight", lambda cfg: None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
         self.mcp = FakeMcp()
-        self.cur = D.Cursors(Path(self.tmp.name) / "cursors.json")
-        self.cur.since = time.time() - 600
-        self.d = D.Dispatcher(self.mcp, self.cur)
-        self.d.cfg = dict(CFG)
+        self.cur = D.Cursors(t / "cursors.json")
+        self.cur.since = int(time.time()) - 600
         self.runs = []
-        p = mock.patch.object(D, "run_agent",
-                              lambda cid, task, tier, cfg, **kw: self.runs.append((cid, tier, task)))
-        p.start()
-        self.addCleanup(p.stop)
-        mock.patch.object(D, "log", lambda *a: None).start()
-        self.addCleanup(mock.patch.stopall)
 
-    def tearDown(self):
-        self.tmp.cleanup()
+        def fake_run(url, cfg, kind, cid, new, context, who=None):
+            self.runs.append({"kind": kind, "cid": cid, "ids": [m["id"] for m in new],
+                              "context": [m["id"] for m in context], "who": who})
+            return {"ok": True}
+
+        self.d = D.Dispatcher(self.mcp, self.cur, run=fake_run)
+        self.d.cfg = dict(self.cfg)
+        self.d.verified = True
+        self.d.groups = {GROUP}
 
     def chat(self, cid, ctype, *messages):
         self.mcp.chats[cid] = {"type": ctype, "messages": list(messages)}
 
 
-class Private(Base):
-    def test_hint_answers_once(self):
-        self.chat(OWNER, "private", msg(10, 20))
-        self.d.process(OWNER, "feed")
-        self.d.process(OWNER, "feed")
-        self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
-        self.assertEqual(self.cur.chats[OWNER], 10)
+class Delivery(Base):
+    def test_owner_dm_runs_in_owner_mode_with_context(self):
+        self.cur.chats[OWNER] = 3
+        self.chat(OWNER, "private", msg(2, 900, text="напиши Пете"), msg(3, 800, out=True, text="что написать?"),
+                  msg(4, 20, text="просто поздоровайся"))
+        self.d.process(OWNER, "events")
+        self.assertEqual(self.runs, [{"kind": "owner", "cid": OWNER, "ids": [4], "context": [2, 3], "who": None}])
+        self.assertEqual(self.cur.chats[OWNER], 4)
 
-    def test_only_owner_dms_launch_the_direct_web_command(self):
-        self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
-        with mock.patch.object(D, "run_agent") as run:
-            self.d.run_private(OWNER, [msg(10, 1), msg(11, 1, text="/web release schedule"), msg(12, 1)])
-            self.d.run_private(GUEST, [msg(13, 1, text="/web release schedule", sender=GUEST)])
-            self.d.run_group(GROUP, [msg(14, 1, text="/web release schedule")])
-            self.d.run_private(OWNER, [msg(15, 1, text="/web forwarded text", forwarded=True)])
-        calls = run.call_args_list
-        self.assertEqual([call.args[0] for call in calls], [OWNER, OWNER, OWNER, GUEST, GROUP, OWNER])
-        self.assertEqual([call.kwargs for call in calls], [
-            {"followup_messages": ((10, "hi"),)}, {"web_query": "release schedule"},
-            {"followup_messages": ((12, "hi"),)}, {}, {}, {},
-        ])
+    def test_nothing_is_answered_twice(self):
+        self.cur.chats[GUEST] = 1
+        self.chat(GUEST, "private", msg(1, 900, sender=GUEST), msg(2, 20, sender=GUEST))
+        self.d.process(GUEST, "events")
+        self.d.process(GUEST, "scan")
+        self.assertEqual([r["ids"] for r in self.runs], [[2]])
+        self.assertEqual(self.runs[0]["kind"], "guest")
+        self.assertEqual(self.runs[0]["who"], {"name": "user3", "username": None})
 
-    def test_contextual_question_runs_the_agent_without_a_prefilled_search(self):
-        self.d.cfg.update(HARNESS="opencode", WEB_SEARCH="duckduckgo")
-        with mock.patch.object(D, "run_agent") as run:
-            self.d.run_private(OWNER, [msg(10, 1, text="А когда заканчивается её поддержка?")])
-        run.assert_called_once()
-        self.assertEqual(run.call_args.kwargs, {"followup_messages": ((10, "А когда заканчивается её поддержка?"),)})
+    def test_first_look_answers_only_after_our_last_reply_and_start(self):
+        self.chat(GUEST, "private", msg(1, 5000, sender=GUEST), msg(2, 100, out=True), msg(3, 50, sender=GUEST))
+        self.d.process(GUEST, "scan")
+        self.assertEqual([r["ids"] for r in self.runs], [[3]])
 
-    def test_owner_followup_carries_recipient_question_and_reply(self):
-        followup = msg(12, 1, text="Просто приветствие", reply_to=11)
-        self.chat(OWNER, "private", msg(13, 0, text="последующее сообщение"),
-                  msg(11, 10, out=True, text="Что ему передать?"),
-                  msg(10, 12, text="Напиши @sample_recipient"), followup,
-                  msg(9, 25, sender=GUEST, text="другой собеседник"))
-        self.d.run_private(OWNER, [followup])
-        self.assertEqual(self.mcp.calls, ["get_message_context"])
-        self.assertEqual(len(self.runs), 1)
-        task = self.runs[0][2]
-        history, messages = [json.loads(line.split(": ", 1)[1]) for line in task.splitlines()
-                             if line.startswith(("Предшествующие реплики", "Новые реплики"))]
-        self.assertEqual(history, [
-            {"id": 10, "author": "owner", "text": "Напиши @sample_recipient"},
-            {"id": 11, "author": "bot", "text": "Что ему передать?"},
-        ])
-        self.assertEqual(messages, [{"id": 12, "author": "owner", "text": "Просто приветствие", "reply_to": 11}])
+    def test_group_answers_only_addressed_messages(self):
+        self.cur.chats[GROUP] = 1
+        self.chat(GROUP, "supergroup", msg(2, 60, sender=GUEST, text="просто болтаем"),
+                  msg(3, 50, sender=GUEST, text="эй, Джарвис, что тут?"), msg(4, 40, sender=5, addressed=True),
+                  msg(5, 30, sender=BOT, addressed=True))
+        self.mcp.bots.add(BOT)
+        self.d.process(GROUP, "events")
+        self.assertEqual(self.runs[0]["kind"], "group")
+        self.assertEqual(self.runs[0]["ids"], [3, 4])
 
-    def test_owner_can_still_reply_when_context_lookup_fails(self):
-        with mock.patch.object(self.mcp, "call", side_effect=TimeoutError):
-            self.d.run_private(OWNER, [msg(12, 1, text="На связи?")])
-        self.assertEqual(len(self.runs), 1)
-        self.assertIn('"text": "На связи?"', self.runs[0][2])
-        self.assertIn("Догружай историю", self.runs[0][2])
+    def test_group_not_allowed_is_ignored_and_new_group_starts_from_now(self):
+        self.chat(-200, "supergroup", msg(1, 10, addressed=True))
+        self.d.process(-200, "events")
+        self.assertNotIn(-200, self.cur.chats)
+        self.chat(GROUP, "supergroup", msg(7, 10, sender=GUEST, addressed=True))
+        self.d.process(GROUP, "events")
+        self.assertEqual((self.runs, self.cur.chats[GROUP]), ([], 7))
 
-    def test_guest_message_is_not_preloaded_into_task(self):
-        self.d.run_private(GUEST, [msg(12, 1, text="guest message text", sender=GUEST)])
-        self.assertEqual(self.mcp.calls, [])
-        self.assertNotIn("guest message text", self.runs[0][2])
+    def test_bots_service_chats_and_old_messages_are_skipped(self):
+        self.mcp.bots.add(BOT)
+        for cid in (BOT, 777000):
+            self.cur.chats[cid] = 0
+            self.chat(cid, "private", msg(1, 10, sender=cid))
+            self.d.process(cid, "events")
+        self.cur.chats[GUEST] = 0
+        self.chat(GUEST, "private", msg(1, 4000, sender=GUEST))
+        self.d.process(GUEST, "events")
+        self.assertEqual(self.runs, [])
 
-    def test_feed_max_does_not_hide_an_earlier_lost_message(self):
-        self.cur.chats[OWNER] = 100
-        self.chat(OWNER, "private", msg(101, 300), msg(102, 10))
-        self.d.process(OWNER, "feed")
-        self.assertIn("id 101..102 (2 шт.)", self.runs[0][2])
+    def test_scan_waits_while_someone_is_typing(self):
+        self.cur.chats[GUEST] = 0
+        self.chat(GUEST, "private", msg(1, 1, sender=GUEST))
+        self.d.process(GUEST, "scan")
+        self.assertEqual(self.runs, [])
+        self.assertIn(GUEST, self.d.pending)
+        self.assertEqual(self.cur.chats[GUEST], 0)
 
-    def test_periodic_pass_recovers_a_missed_message(self):
-        self.cur.chats[GUEST] = 5
-        self.chat(GUEST, "private", msg(5, 900, sender=GUEST), msg(6, 120, sender=GUEST))
-        self.mcp.dialogs = [{"chat_id": GUEST, "type": "User"}, {"chat_id": GROUP, "type": "Supergroup"}]
+
+class ReviewFixes(Base):
+    def test_channel_listed_in_groups_is_ignored(self):
+        self.d.groups = {-300}
+        self.chat(-300, None, msg(1, 10, addressed=True, text="Джарвис"))
+        self.d.process(-300, "events")
+        self.assertEqual((self.runs, self.cur.chats.get(-300)), ([], None))
+
+    def test_folder_text_error_keeps_group_cursors(self):
+        self.cfg.update(GROUPS="", GROUPS_FOLDER="Папка")
+        self.cur.chats.update({-500: 9})
+        self.mcp.folders = [-500]
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        real = self.mcp.call
+        self.mcp.call = lambda n, a, timeout=60, raw=False: ("Error: flood wait 30" if n == "list_folders" else real(n, a, timeout, raw))
+        self.d.group_list.read_at = None
+        self.d.step()
+        self.assertIn(-500, self.cur.chats)
+        self.assertEqual(self.d.groups, {-500})
+
+    def test_mention_right_after_a_group_is_allowed_is_answered(self):
+        self.d.group_list.allowed_at[GROUP] = time.time() - 30
+        self.chat(GROUP, "supergroup", msg(1, 120, sender=GUEST, addressed=True), msg(2, 10, sender=OWNER, addressed=True))
+        self.d.process(GROUP, "events")
+        self.assertEqual([r["ids"] for r in self.runs], [[2]])
+
+    def test_run_that_never_started_puts_the_burst_back(self):
+        self.d.run = lambda *a: {"ok": False, "started": False, "error": "RuntimeError"}
+        self.cur.chats[GUEST] = 1
+        self.chat(GUEST, "private", msg(1, 900, sender=GUEST), msg(2, 20, sender=GUEST))
+        self.d.process(GUEST, "events")
+        self.assertEqual(self.cur.chats[GUEST], 1)
+        self.assertIn(GUEST, self.d.pending)
+
+    def test_owner_dm_is_always_scanned(self):
+        self.mcp.dialogs = [{"chat_id": GUEST, "type": "User"}]
         self.d.periodic()
-        self.assertEqual(self.d.due[GUEST][1], "scan")
-        self.assertNotIn(GROUP, self.d.due)  # not an allowed group
-        self.d.process(GUEST, "scan")
-        self.assertEqual([(c, t) for c, t, _ in self.runs], [(GUEST, "guest")])
-        self.assertEqual(len(self.d.misses), 1)
+        self.assertEqual(set(self.d.pending), {GUEST, OWNER, GROUP})
 
-    def test_first_look_only_after_last_reply_and_since(self):
-        self.chat(GUEST, "private", msg(1, 3000, sender=GUEST), msg(2, 200, sender=GUEST),
-                  msg(3, 100, out=True), msg(4, 50, sender=GUEST))
-        self.d.process(GUEST, "feed")
-        self.assertIn("id 4..4", self.runs[0][2])
+    def test_no_dispatch_until_the_account_is_confirmed(self):
+        self.d.verified = False
+        self.mcp.me = {"id": 999}
+        real = self.mcp.call
+        self.mcp.call = lambda n, a, timeout=60, raw=False: self.mcp.me if n == "get_me" else real(n, a, timeout, raw)
+        with self.assertRaises(SystemExit):
+            self.d.step()
+        self.assertEqual([c[0] for c in self.mcp.calls], [])
+        self.mcp.me = {"id": 2}
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertTrue(self.d.verified)
 
-    def test_first_look_before_first_run_is_not_answered(self):
-        self.cur.since = time.time()
-        self.chat(GUEST, "private", msg(7, 60, sender=GUEST))
-        self.d.process(GUEST, "scan")
+    def test_live_position_is_taken_before_the_first_scan(self):
+        self.d.next_scan = 0.0
+        self.d.step()
+        names = [c[0] for c in self.mcp.calls]
+        self.assertLess(names.index("wait_for_events"), names.index("list_chats"))
+
+    def test_event_hint_waits_for_a_message_that_just_arrived(self):
+        self.cur.chats[GUEST] = 0
+        self.chat(GUEST, "private", msg(1, 1, sender=GUEST))
+        self.d.process(GUEST, "events")
         self.assertEqual(self.runs, [])
-        self.assertEqual(self.cur.chats[GUEST], 7)
-
-    def test_stale_messages_are_skipped(self):
-        self.cur.chats[OWNER] = 1
-        self.chat(OWNER, "private", msg(2, 4000))
-        self.d.process(OWNER, "scan")
-        self.assertEqual(self.runs, [])
-        self.assertEqual(self.cur.chats[OWNER], 2)
-
-    def test_bots_and_self_are_ignored(self):
-        self.mcp.bots.add(BOT)
-        self.cur.chats[BOT] = 0
-        self.chat(BOT, "private", msg(1, 30, sender=BOT))
-        self.d.process(BOT, "feed")
-        self.chat(SELF, "private", msg(1, 30, sender=SELF))
-        self.d.process(SELF, "feed")
-        self.chat(777000, "private", msg(1, 30, sender=777000, text="Login code: 12345"))
-        self.d.process(777000, "feed")
-        self.assertEqual(self.runs, [])
-        self.assertIn(BOT, self.cur.bots)
-
-    def test_periodic_pass_lets_a_fresh_burst_settle_once(self):
-        self.cur.chats[OWNER] = 0
-        self.chat(OWNER, "private", msg(1, 1))
-        self.d.process(OWNER, "scan")
-        self.assertEqual(self.runs, [])
-        self.assertGreater(self.d.due[OWNER][0], time.monotonic())
-        self.d.process(OWNER, "scan")  # postponed once only (clock skew cannot stall it)
-        self.assertEqual(len(self.runs), 1)
-        self.assertEqual(self.d.misses, [])  # a few seconds old: not a miss
-
-    def test_long_backlog_is_read_in_bounded_passes(self):
-        self.cur.chats[OWNER] = 0
-        self.chat(OWNER, "private", *[msg(i, 100) for i in range(1, 251)])
-        with mock.patch.object(D, "MAX_PAGES", 2):
-            self.d.process(OWNER, "feed")
-            self.assertEqual(self.cur.chats[OWNER], 200)
-            self.assertIn(OWNER, self.d.due)  # the rest is due again
-            self.d.process(OWNER, "feed")
-        self.assertEqual(self.cur.chats[OWNER], 250)
-        self.assertEqual(len(self.runs), 2)
-
-    def test_cursor_saved_before_the_run(self):
-        self.chat(OWNER, "private", msg(10, 20))
-        D.run_agent = lambda *a, **kw: self.runs.append(json.loads(self.cur.path.read_text())["chats"])
-        self.d.process(OWNER, "feed")
-        self.assertEqual(self.runs, [{str(OWNER): 10}])
-
-
-    def test_first_look_reads_a_long_burst_whole(self):
-        self.chat(GUEST, "private", *[msg(i, 100, sender=GUEST) for i in range(1, 26)])
-        self.d.process(GUEST, "feed")
-        self.assertIn("id 1..25 (25 шт.)", self.runs[0][2])
-
-    def test_failed_save_keeps_the_old_cursor(self):
-        self.cur.chats[OWNER] = 1
-        self.chat(OWNER, "private", msg(2, 30))
-        with mock.patch.object(self.cur, "save", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.d.process(OWNER, "feed")
-        self.assertEqual((self.cur.chats[OWNER], self.runs), (1, []))
-        self.d.process(OWNER, "feed")
+        self.d.waiting[GUEST] -= D.MAX_WAIT  # someone has been typing for too long: answer now
+        self.d.process(GUEST, "events")
         self.assertEqual(len(self.runs), 1)
 
 
-class Groups(Base):
-    def setUp(self):
-        super().setUp()
-        self.d.groups = {GROUP}
+class Limits(Base):
+    def test_rate_limited_burst_stays_unread_and_comes_back(self):
+        self.cfg.update(PER_CHAT_PER_HOUR="1")
+        self.d.cfg = dict(self.cfg)
+        self.cur.chats[GUEST] = 0
+        self.chat(GUEST, "private", msg(1, 20, sender=GUEST))
+        self.d.process(GUEST, "events")
+        self.mcp.chats[GUEST]["messages"].append(msg(2, 10, sender=GUEST))
+        self.d.process(GUEST, "events")
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual(self.cur.chats[GUEST], 1, "the limited message must not be marked as read")
+        self.assertGreater(self.d.pending[GUEST]["last"], time.monotonic() + 60)
 
-    def test_newly_allowed_group_starts_from_now(self):
-        self.chat(GROUP, "supergroup", msg(50, 30, addressed=True, sender=GUEST))
-        self.d.process(GROUP, "events")
-        self.assertEqual(self.runs, [])
-        self.assertEqual(self.cur.chats[GROUP], 50)
-
-    def test_only_addressed_or_triggered_messages(self):
-        self.cur.chats[GROUP] = 10
-        self.chat(GROUP, "supergroup",
-                  msg(11, 30, sender=GUEST, text="просто болтовня"),
-                  msg(12, 30, sender=GUEST, text="джарвис, привет"),
-                  msg(13, 30, sender=OWNER, addressed=True),
-                  msg(14, 30, sender=BOT, text="Джарвис"))
-        self.mcp.bots.add(BOT)
-        self.d.process(GROUP, "events")
-        self.assertEqual([(c, t) for c, t, _ in self.runs], [(GROUP, "owner"), (GROUP, "guest")])
-        self.assertIn("id 13", self.runs[0][2])
-        self.assertIn("id 12", self.runs[1][2])
-        self.assertNotIn("id 14", self.runs[1][2])
-        self.assertEqual(self.cur.chats[GROUP], 14)
-
-    def test_group_not_allowed_is_ignored(self):
-        self.d.groups = set()
-        self.cur.chats[GROUP] = 10
-        self.chat(GROUP, "supergroup", msg(11, 30, addressed=True, sender=GUEST))
-        self.d.process(GROUP, "events")
-        self.assertEqual(self.runs, [])
+    def test_guests_cannot_use_up_the_owners_budget(self):
+        rl, cfg = D.RateLimit(), dict(CFG, TOTAL_PER_HOUR="2", PER_CHAT_PER_HOUR="5", OWNER_PER_HOUR="1")
+        self.assertTrue(rl.allow(GUEST, False, cfg))
+        self.assertTrue(rl.allow(5, False, cfg))
+        self.assertFalse(rl.allow(6, False, cfg))
+        self.assertTrue(rl.allow(OWNER, True, cfg))
+        self.assertFalse(rl.allow(OWNER, True, cfg))
 
 
-class LiveEvents(Base):
-    def test_events_become_settled_hints(self):
-        self.d.groups = {GROUP}
-        self.d.poll_events(0)  # first call: position only
-        self.mcp.events = [
-            {"chat_id": GROUP, "chat_type": "supergroup", "message_id": 5},
-            {"chat_id": -200, "chat_type": "supergroup", "message_id": 5},   # not allowed
-            {"chat_id": BOT, "chat_type": "private", "message_id": 1, "sender_bot": True},
-            {"chat_id": GUEST, "chat_type": "private", "message_id": 9, "out": True},
-        ]
-        self.d.poll_events(0)
-        self.assertEqual(set(self.d.pending), {GROUP})
-        self.assertIn(BOT, self.cur.bots)
-        self.d.pending[GROUP]["last"] -= 10
-        self.d.settle_pending()
-        self.assertEqual(self.d.due[GROUP][1], "events")
-
-    def test_gap_or_reset_triggers_a_history_pass(self):
-        self.d.poll_events(0)
-        self.d.next_scan = time.monotonic() + 100
-        self.mcp.events = []
-        with mock.patch.object(self.mcp, "call", return_value={"boot": "c", "last_seq": 1, "reset": True}):
-            self.d.poll_events(0)
-        self.assertEqual(self.d.next_scan, 0.0)
-
-    def test_a_live_hint_is_not_counted_as_a_miss(self):
-        self.d.hint(OWNER, time.monotonic(), "scan")
-        self.d.hint(OWNER, time.monotonic() + 5, "feed")
-        self.assertEqual(self.d.due[OWNER][1], "feed")
-
-
-class Stall(Base):
-    def test_restart_after_misses_in_two_passes_without_live_events(self):
-        now = time.monotonic()
-        self.d.last_live, self.d.misses = now - 500, [now - 300, now - 100]
-        with mock.patch.object(D.subprocess, "run") as run:
-            self.d.check_stall()
-            run.assert_called_once()
-            self.assertIn("telegram-mcp.service", run.call_args[0][0])
-            self.d.misses = [now - 300, now - 100]
-            self.d.check_stall()  # cooldown
-            run.assert_called_once()
-        self.assertGreater(json.loads(self.cur.path.read_text())["last_restart"], 0)
-
-    def test_no_restart_when_live_events_flow_or_disabled(self):
-        now = time.monotonic()
-        with mock.patch.object(D.subprocess, "run") as run:
-            self.d.last_live, self.d.misses = now - 200, [now - 300, now - 100]
-            self.d.check_stall()
-            self.d.cfg["RESTART_STALLED_MCP"] = "0"
-            self.d.last_live, self.d.misses = now - 500, [now - 300, now - 100]
-            self.d.check_stall()
-            self.d.cfg["RESTART_STALLED_MCP"] = "1"
-            self.d.misses = [now - 100]
-            self.d.check_stall()
-            run.assert_not_called()
-
-
-    def test_misses_before_a_live_event_do_not_count(self):
-        now = time.monotonic()
-        self.d.last_live, self.d.misses = now - 500, [now - 600, now - 300, now - 100]
-        with mock.patch.object(D.subprocess, "run") as run:
-            self.d.check_stall()
-            run.assert_called_once()
-
-
-class Persist(unittest.TestCase):
-    def test_roundtrip(self):
-        with tempfile.TemporaryDirectory() as t:
-            p = Path(t) / "state/cursors.json"
-            c = D.Cursors(p)
-            self.assertTrue(p.exists())
-            c.chats[-100] = 7
-            c.bots.add(4)
-            c.save()
-            c2 = D.Cursors(p)
-            self.assertEqual((c2.chats, c2.bots, c2.since), ({-100: 7}, {4}, c.since))
-
-
-class Pause(Base):
-    """update_mcp.py apply: a pause file stops new runs; the ack says none is in progress."""
-
-    def setUp(self):
-        super().setUp()
-        t = Path(self.tmp.name)
-        for name, val in (("PAUSE", t / "pause"), ("PAUSE_ACK", t / "pause.ack"),
-                          ("FEED", t / "no-feed"), ("load_config", lambda: dict(CFG)),
-                          ("folder_groups", lambda mcp, title: set())):
-            mock.patch.object(D, name, val).start()
-        self.chat(OWNER, "private", msg(10, 20))
+class Loop(Base):
+    def test_pause_stops_new_runs_and_acks(self):
+        config.PAUSE.touch()
+        self.cur.chats[GUEST] = 0
+        self.chat(GUEST, "private", msg(1, 20, sender=GUEST))
+        self.d.hint(GUEST, "events", at=time.monotonic() - 60)
         self.d.next_scan = time.monotonic() + 999
-        self.d.hint(OWNER, 0, "feed")
-
-    def test_paused_starts_no_run_and_acks(self):
-        D.PAUSE.touch()
+        self.d.seq = 10
         self.d.step()
         self.assertEqual(self.runs, [])
-        self.assertTrue(D.PAUSE_ACK.exists())
-        self.assertNotIn(OWNER, self.cur.chats, "the cursor stays: the message is answered later")
-        D.PAUSE.unlink()
-        self.d.step()
-        self.assertEqual([(c, t) for c, t, _ in self.runs], [(OWNER, "owner")])
-
-    def test_stale_pause_file_is_ignored(self):
-        D.PAUSE.touch()
-        old = time.time() - D.PAUSE_MAX - 1
-        os.utime(D.PAUSE, (old, old))
+        self.assertTrue(config.PAUSE_ACK.exists())
+        config.PAUSE.unlink()
         self.d.step()
         self.assertEqual(len(self.runs), 1)
+
+    def test_events_hint_then_settle(self):
+        self.d.seq, self.d.next_scan = 10, time.monotonic() + 999
+        self.mcp.events = [{"chat_id": GUEST, "chat_type": "private"}, {"chat_id": -300, "chat_type": "group"},
+                           {"chat_id": GUEST, "chat_type": "private", "out": True}]
+        self.d.poll_events(0)
+        self.assertEqual(set(self.d.pending), {GUEST})
+        self.assertEqual(self.d.due(), [])
+        self.d.pending[GUEST]["last"] -= D.SETTLE
+        self.assertEqual(self.d.due(), [GUEST])
+
+    def test_group_confirmed_off_the_folder_loses_its_cursor(self):
+        self.cfg.update(GROUPS="", GROUPS_FOLDER="Папка")
+        self.cur.chats.update({-500: 9, GUEST: 3})
+        self.mcp.folders = [-500]
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertEqual(self.d.groups, {-500})
+        self.mcp.folders = []
+        self.d.group_list.read_at = None
+        self.d.step()
+        self.assertNotIn(-500, self.cur.chats)
+        self.assertIn(GUEST, self.cur.chats)
+
+    def test_unreadable_folder_keeps_the_list_for_a_while_then_suspends_it(self):
+        g, cfg = D.Groups(), dict(CFG, GROUPS="", GROUPS_FOLDER="Папка")
+        self.mcp.folders = [-500]
+        self.assertEqual(g.refresh(self.mcp, cfg), ({-500}, True))
+        self.mcp.folders, g.read_at = None, None
+        ids, confirmed = g.refresh(self.mcp, cfg)
+        self.assertEqual((ids, confirmed), ({-500}, True))
+        g.ok_at -= D.FOLDER_TTL + 1
+        g.read_at = None
+        self.assertEqual(g.refresh(self.mcp, cfg), (set(), False))
+
+    def test_folder_never_read_does_not_drop_group_cursors(self):
+        self.cfg.update(GROUPS="", GROUPS_FOLDER="Папка")
+        self.cur.chats.update({-500: 9})
+        self.mcp.folders = None  # unreadable from the start
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertEqual(self.d.groups, set())
+        self.assertIn(-500, self.cur.chats)
+
+
+class Prompts(Base):
+    def test_guest_prompt_has_no_memory_and_no_owner_identity(self):
+        config.MEMORY.write_text("- секрет владельца")
+        for kind in ("guest", "group"):
+            with self.subTest(kind):
+                text = D.instructions(self.cfg, kind)
+                for private in ("секрет владельца", "Иван", "owner_x", "{{"):
+                    self.assertNotIn(private, text)
+                self.assertIn("Doom", text)
+
+    def test_owner_prompt_has_memory_and_name(self):
+        config.MEMORY.write_text("- отвечать кратко")
+        text = D.instructions(self.cfg, "owner")
+        self.assertIn("отвечать кратко", text)
+        self.assertIn("Иван", text)
+
+    def test_persona_override(self):
+        config.CONFIG_DIR.mkdir()
+        (config.CONFIG_DIR / "persona.md").write_text("Ты — {{BOT_NAME}}, пират.")
+        self.assertIn("Ты — Doom, пират.", D.instructions(self.cfg, "guest"))
+
+    def test_task_marks_owner_messages(self):
+        t = D.task("group", GROUP, [msg(5, 1, text="Джарвис, привет")], [msg(4, 9, sender=GUEST, text="ку")], self.cfg)
+        self.assertIn('"from": "owner"', t)
+        self.assertIn('"from": "user3"', t)
+
+
+class Execute(Base):
+    def setUp(self):
+        super().setUp()
+        self.upstream = helpers.FakeUpstream()
+        p = mock.patch.object(D, "Mcp", lambda url: self.upstream)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def execute(self, results, kind="owner", send=False):
+        calls = []
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            calls.append(retry)
+            if send:  # the agent sends through the broker before failing
+                D.broker.Run.last.call("send_message", {"chat_id": OWNER, "message": "x"})
+            return results[len(calls) - 1]
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            s = D.execute("http://x", self.cfg, kind, OWNER if kind == "owner" else GUEST, [msg(1, 1)], [])
+        return s, calls
+
+    def test_transient_failure_before_any_effect_is_retried_once(self):
+        R = D.harnesses.Result
+        s, calls = self.execute([R(False, 1, True), R(True, 0, False)])
+        self.assertEqual((s["ok"], calls), (True, [False, True]))
+
+    def test_no_retry_and_no_notice_after_an_effect(self):
+        R = D.harnesses.Result
+        s, calls = self.execute([R(False, 1, True)], send=True)
+        self.assertEqual(calls, [False])
+        self.assertEqual([c[0] for c in self.upstream.calls], ["send_message"])  # only the agent's own send
+
+    def test_failed_owner_run_gets_a_notice_guest_does_not(self):
+        R = D.harnesses.Result
+        fail = [R(False, 1, False)] * 2  # a run that called nothing is retried once
+        self.execute(fail)
+        self.assertEqual([c[0] for c in self.upstream.calls], ["send_message"])
+        self.upstream.calls.clear()
+        self.execute(fail, kind="guest")
+        self.assertEqual(self.upstream.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

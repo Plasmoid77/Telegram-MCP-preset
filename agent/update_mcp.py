@@ -15,16 +15,17 @@ telegram-agent. Any failure: back to the previous version.
 
 Part of Telegram-MCP-preset: https://github.com/Plasmoid77/Telegram-MCP-preset
 """
-import fcntl, json, re, shutil, subprocess, sys, time
+import fcntl, json, re, shutil, subprocess, sys, time, urllib.parse
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE))  # dispatcher.py next to this file: config, MCP client
-import dispatcher as D  # noqa: E402
+sys.path.insert(0, str(BASE))  # systemd runs python -I
+import config  # noqa: E402
+from mcp import Mcp  # noqa: E402
 
 MCP_DIR = Path.home() / ".local/share/telegram-mcp"
-STATE = BASE / "state/mcp_update.json"
-LOCK = BASE / "state/mcp_update.lock"
+STATE = config.STATE_DIR / "mcp_update.json"
+LOCK = config.STATE_DIR / "mcp_update.lock"
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 MAX_CHANGES = 20       # lines of the change list in the Telegram message
 IDLE_WAIT = 900        # s to wait for a running bot reply before giving up
@@ -33,7 +34,7 @@ AGENT_WAIT = 15        # s telegram-agent must stay up after the upgrade
 
 
 def log(*a):
-    D.log(*a)
+    print(time.strftime("%F %T"), *a, flush=True)
 
 
 def sh(*cmd, cwd=None, check=True):
@@ -143,13 +144,13 @@ def check(mcp=None, cfg=None):
     if st.get("notified") == latest:
         log("owner already notified about this release")
         return 0
-    cfg = cfg or D.load_config()
+    cfg = cfg or config.load()
     chat = cfg.get("NOTIFY_CHAT") or cfg.get("OWNER_ID")
     if not chat or "<" in chat:
         log("NOTIFY_CHAT is not set in config.env: not messaging anyone")
         return 0
     try:
-        reply = (mcp or D.Mcp(D.MCP_URL)).call(
+        reply = (mcp or Mcp(cfg["MCP_URL"])).call(
             "send_message", {"chat_id": chat if chat == "me" else int(chat),
                              "message": notice(cur, latest, lines)}, raw=True)
         if not reply.startswith("Message sent"):
@@ -172,16 +173,19 @@ def pause_agent(timeout=IDLE_WAIT):
     """Ask the dispatcher to start no new runs; True once it confirms that none is running.
 
     The dispatcher checks the pause file before every run and, while paused, writes the ack
-    file at the start of each loop step. Runs are synchronous, so an ack means no run is in
+    file at the end of each loop step. Runs are synchronous, so an ack means no run is in
     progress and none will start: stopping telegram-agent then kills nothing.
     """
-    D.PAUSE_ACK.unlink(missing_ok=True)
-    D.PAUSE.touch()
+    config.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    global OWN_PAUSE
+    OWN_PAUSE = OWN_PAUSE or not config.PAUSE.exists()  # someone else's pause is theirs to lift
+    config.PAUSE_ACK.unlink(missing_ok=True)
+    config.PAUSE.touch()
     if systemctl("is-active", "telegram-agent", check=False) != "active":
         return True
     end = time.monotonic() + timeout
     said = False
-    while not D.PAUSE_ACK.exists():
+    while not config.PAUSE_ACK.exists():
         if time.monotonic() > end:
             return False
         if not said:
@@ -191,14 +195,21 @@ def pause_agent(timeout=IDLE_WAIT):
     return True
 
 
+OWN_PAUSE = False
+
+
 def resume_agent():
-    D.PAUSE.unlink(missing_ok=True)
-    D.PAUSE_ACK.unlink(missing_ok=True)
+    """Lift the pause only if this run set it (an operator's own pause stays)."""
+    global OWN_PAUSE
+    if OWN_PAUSE:
+        config.PAUSE.unlink(missing_ok=True)
+        config.PAUSE_ACK.unlink(missing_ok=True)
+    OWN_PAUSE = False
 
 
 def smoke(cfg, mcp=None, wait=READY_WAIT):
     """Call what the dispatcher depends on; raise on anything unexpected."""
-    mcp = mcp or D.Mcp(D.MCP_URL)
+    mcp = mcp or Mcp(cfg["MCP_URL"])
     end = time.monotonic() + wait
     while True:
         try:
@@ -235,6 +246,8 @@ def switch(ref):
 
 
 def restart_and_verify(cfg, ref, agent):
+    if config.PAUSE.exists():
+        config.PAUSE.touch()  # keep the pause fresh (the dispatcher ignores one older than 30 min)
     switch(ref)
     systemctl("restart", "telegram-mcp")
     smoke(cfg)
@@ -262,7 +275,10 @@ def apply(target=None, assume_yes=False):
 
 
 def _apply(target, assume_yes):
-    cfg = D.load_config()
+    cfg = config.load()
+    if urllib.parse.urlsplit(cfg["MCP_URL"]).hostname not in ("127.0.0.1", "localhost", "::1"):
+        log(f"MCP_URL {cfg['MCP_URL']} is not this machine's telegram-mcp: the upgrade could not be verified")
+        return 1
     if git("status", "--porcelain", "--untracked-files=no"):
         log(f"{MCP_DIR} has local changes: commit or discard them first (git -C {MCP_DIR} status)")
         return 1
@@ -294,8 +310,7 @@ def _apply(target, assume_yes):
         log(f"telegram-mcp does not work even before the upgrade, not touching it: {e}")
         return 1
     if not pause_agent():
-        log("the bot did not confirm the pause in 15 min (busy, or telegram-agent older than this "
-            "script: run install.sh and restart it): try later")
+        log("the bot did not confirm the pause in 15 min (busy?): try later")
         return 1
     agent = systemctl("is-active", "telegram-agent", check=False) == "active"
     log(f"upgrading telegram-mcp {cur or commit[:12]} -> {target}")

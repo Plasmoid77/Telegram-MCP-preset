@@ -7,17 +7,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: pinned telegram-mcp source (contract test)
+        run: |
+          ref=$(grep -oP 'TELEGRAM_MCP_REF:-\K[^}]+' install.sh)
+          git clone --quiet --depth 1 --branch "$ref" https://github.com/chigwell/telegram-mcp.git "$RUNNER_TEMP/upstream"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: ffmpeg + numpy (asr-server decode tests)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg && pip install -q numpy
       - name: shellcheck
-        run: shellcheck install.sh
+        run: shellcheck install.sh scripts/*.sh
       - name: compile
         run: python -m py_compile agent/*.py asr/*.py tests/*.py
-      - name: hook tests
-        run: python -m unittest discover -s tests -v
+      - name: tests
+        run: UPSTREAM_SRC="$RUNNER_TEMP/upstream" python -m unittest discover -s tests -v
       - name: no personal data or secrets
         run: |
           ! grep -rInE '(TELEGRAM_API_HASH|TELEGRAM_SESSION_STRING)=[0-9a-zA-Z]{8,}' --exclude-dir=.git .
