@@ -30,6 +30,37 @@ def tool(name, description, properties, required=None):
         "required": list(properties) if required is None else required, "additionalProperties": False}}
 
 
+def plain(upstream_tool):
+    """The upstream tool as offered to the model, with every argument of one known type.
+
+    Qwen-style tool calls carry argument values as text, and the provider turns them back into
+    numbers only when the schema names one type: for `integer | null` or `integer | array`
+    the value stays "458", and OpenCode rejects the call before it reaches the broker. So an
+    optional `X | null` argument is offered as plain `X` (leaving it out means null), and of
+    several types without a string the first one is kept (the full schema stays available
+    through find_telegram_tool / call_telegram_tool).
+    """
+    schema = upstream_tool.get("inputSchema") or {}
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return upstream_tool
+    out = {}
+    for key, prop in props.items():
+        union = prop.get("anyOf") or prop.get("oneOf") if isinstance(prop, dict) else None
+        if not isinstance(union, list) or any(isinstance(u, dict) and u.get("type") == "string" for u in union):
+            out[key] = prop
+            continue
+        kinds = [u for u in union if isinstance(u, dict) and u.get("type") != "null"]
+        if not kinds:
+            out[key] = prop
+            continue
+        rest = {k: v for k, v in prop.items() if k not in ("anyOf", "oneOf")}
+        if rest.get("default", 0) is None:
+            del rest["default"]
+        out[key] = {**rest, **kinds[0]}
+    return {**upstream_tool, "inputSchema": {**schema, "properties": out}}
+
+
 READ_RESULT = tool("read_result", "Read a further page of a long tool result.",
                    {"result_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}})
 SEARCH_WEB = tool("search_web", "Search the public web. Use a short query about public facts only: "
@@ -96,7 +127,7 @@ class Run:
         names = policy.offered(scope, self.upstream_tools)
         if scope != "owner" and not private:
             names.discard("get_user_status")
-        self.catalog = {n: self.upstream_tools[n] for n in sorted(names)}
+        self.catalog = {n: plain(self.upstream_tools[n]) for n in sorted(names)}
         own = [READ_RESULT]
         if cfg.get("WEB_SEARCH") == "duckduckgo":
             own.append(SEARCH_WEB)

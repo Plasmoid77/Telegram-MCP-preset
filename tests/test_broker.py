@@ -43,6 +43,29 @@ class Catalog(unittest.TestCase):
         self.assertNotIn("leave_chat", names)  # reachable through call_telegram_tool only
         self.assertNotIn("wait_for_events", names)
 
+    def test_one_type_per_argument(self):
+        # Qwen passes "458" for `integer | array` / `integer | null` and OpenCode rejects the call
+        fwd = {"name": "forward_message", "description": "f", "inputSchema": {"type": "object", "properties": {
+            "from_chat_id": {"anyOf": [{"type": "integer"}, {"type": "string"}], "title": "From"},
+            "message_id": {"anyOf": [{"type": "integer"}, {"type": "array", "items": {"type": "integer"}}]},
+            "topic_id": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None, "title": "Topic"},
+            "silent": {"type": "boolean", "default": False}}, "required": ["from_chat_id", "message_id"]}}
+
+        class Up(FakeUpstream):
+            def catalog(self):
+                return [fwd]
+
+        r = run("owner", chat=OWNER, upstream=Up())
+        props = r.catalog["forward_message"]["inputSchema"]["properties"]
+        self.assertEqual(props["message_id"], {"type": "integer"})
+        self.assertEqual(props["topic_id"], {"type": "integer", "title": "Topic"})
+        self.assertEqual(props["from_chat_id"], fwd["inputSchema"]["properties"]["from_chat_id"])
+        self.assertEqual(props["silent"], {"type": "boolean", "default": False})
+        self.assertEqual(r.catalog["forward_message"]["inputSchema"]["required"], ["from_chat_id", "message_id"])
+        self.assertIn("anyOf", fwd["inputSchema"]["properties"]["message_id"])  # upstream copy untouched
+        found = text(r.call("find_telegram_tool", {"query": "forward"}))
+        self.assertIn("array", found)  # the full schema stays reachable for call_telegram_tool
+
     def test_web_search_off(self):
         self.assertNotIn("search_web", run(cfg=dict(CFG, WEB_SEARCH="")).catalog)
 
