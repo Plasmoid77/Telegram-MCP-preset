@@ -29,6 +29,7 @@ class FakeMcp:
     def __init__(self):
         self.chats, self.bots, self.dialogs, self.events, self.calls = {}, set(), [], [], []
         self.folders = None  # None: list_folders fails
+        self.forwarded, self.forward_error = [], None
 
     def call(self, name, args, timeout=60, raw=False):
         self.calls.append((name, args))
@@ -44,6 +45,8 @@ class FakeMcp:
         if name == "get_message_context":
             return {"chat_id": args["chat_id"], "results": self.chats.get(args["chat_id"], {"messages": []})["messages"]}
         if name == "list_chats":
+            if self.dialogs is None:
+                raise RuntimeError("down")
             return json.dumps({"results": self.dialogs})
         if name == "get_chat":
             return {"bot": args["chat_id"] in self.bots}
@@ -56,7 +59,17 @@ class FakeMcp:
             return json.dumps({"folders": [{"id": 1, "title": "Папка"}]})
         if name == "get_folder":
             return {"included_chats": [{"id": g, "type": "Supergroup"} for g in self.folders]}
+        if name == "forward_message":
+            self.forwarded.append(args)
+            if self.forward_error:
+                return self.forward_error
+            return (f"Message {args['message_id']} forwarded from {args['from_chat_id']} to {args['to_chat_id']}."
+                    + (f" Destination message IDs: [{900 + args['message_id']}]." if args.get("topic_id") else ""))
         raise AssertionError(name)
+
+    def tool_result(self, name, args, timeout=60):
+        self.calls.append((name, args))
+        return {"content": [{"type": "text", "text": "Message sent. message_id=1"}], "isError": False}
 
 
 class Base(unittest.TestCase):
@@ -330,6 +343,152 @@ class Prompts(Base):
         t = D.task("group", GROUP, [msg(5, 1, text="Джарвис, привет")], [msg(4, 9, sender=GUEST, text="ку")], self.cfg)
         self.assertIn('"from": "owner"', t)
         self.assertIn('"from": "user3"', t)
+
+
+AVITO, CONCLAVE, TOPIC = 8001, -1009, 68
+
+
+class Relays(Base):
+    def setUp(self):
+        super().setUp()
+        self.cfg["RELAYS"] = f"{AVITO}>{CONCLAVE}:{TOPIC}~avito\\.ru/\\d{{6,}}"
+        self.d.cfg = dict(self.cfg)
+        self.d.relays = D.parse_relays(self.cfg["RELAYS"])[0]
+        self.mcp.bots.add(AVITO)
+
+    def listing(self, i, age=30, **kw):
+        return msg(i, age, sender=AVITO, text=f"HDD 12TB\n18 000 ₽\nСсылка: https://avito.ru/85097{i:05d}", **kw)
+
+    def test_rules(self):
+        rules, bad = D.parse_relays("1>-2:5~avito  3>-4 x>1 5>5 6>7~( 8>-9:0 10>-1 10>-2 11>-1~a{99999999999} " + "1" * 5000 + ">-1")
+        self.assertEqual(set(rules), {1, 3})
+        self.assertEqual(rules[1][:2], (-2, 5))
+        self.assertEqual(rules[3], (-4, None, None))
+        self.assertEqual(bad, ["x>1", "5>5", "6>7~(", "8>-9:0", "10>-1", "10>-2", "11>-1~a{99999999999}", "1" * 5000 + ">-1"])
+        self.assertTrue(D.relay_match({"text": "x", "links": [{"url": "https://AVITO.ru/1"}]}, rules[1][2]))
+
+    def start(self, cursor):
+        self.d.relay_state(AVITO)["cursor"] = cursor
+
+    def test_new_rule_starts_from_now(self):
+        self.chat(AVITO, "private", self.listing(1, age=60))
+        self.cur.relays.clear()
+        self.d.relay_state(AVITO)  # activation: the newest message now is the boundary
+        self.mcp.chats[AVITO]["messages"] += [self.listing(i, age=5) for i in range(2, 2 + D.NEW_CHAT_PAGE + 3)]
+        while self.d.process(AVITO, "scan") is None and AVITO in self.d.pending:
+            self.d.pending.clear()
+        self.assertEqual([a["message_id"] for a in self.mcp.forwarded], list(range(2, 2 + D.NEW_CHAT_PAGE + 3)))
+        self.assertEqual(self.cur.relays[AVITO]["cursor"], 1 + D.NEW_CHAT_PAGE + 3)
+
+    def test_unread_activation_falls_back_to_the_start_time(self):
+        self.chat(AVITO, "private", self.listing(1, age=60), self.listing(2, age=50))
+        self.cur.relays[AVITO] = {"rule": D.relay_ident(self.d.relays[AVITO]), "since": int(time.time()) - 55,
+                                  "cursor": None}
+        self.d.process(AVITO, "scan")
+        self.assertEqual([a["message_id"] for a in self.mcp.forwarded], [2])
+        self.assertEqual(self.cur.relays[AVITO]["cursor"], 2)
+        self.mcp.chats[AVITO]["messages"].append(self.listing(9, age=1))
+        self.cfg["RELAYS"] = f"{AVITO}>{CONCLAVE}"  # a changed rule starts again from now
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertEqual(self.cur.relays[AVITO]["cursor"], 9)
+        self.cur.chats[AVITO] = 3
+        self.cfg["RELAYS"] = ""
+        self.d.step()
+        self.assertEqual((self.cur.relays, self.cur.chats[AVITO]), ({}, 9))
+
+    def test_relay_source_keeps_its_progress_when_group_cursors_are_cleaned(self):
+        self.cfg["RELAYS"] = f"{-777}>{CONCLAVE}"
+        self.cur.chats[-777] = 5  # an old reply cursor of the same chat does not matter
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.cur.relay_commit(-777, 7)
+        self.d.step()
+        self.assertEqual(self.cur.relays[-777]["cursor"], 7)
+        self.assertEqual(json.loads(self.cur.path.read_text())["relays"]["-777"]["cursor"], 7)
+
+    def test_listings_are_forwarded_once_in_order_and_service_messages_are_not(self):
+        self.start(1)
+        self.chat(AVITO, "private", self.listing(1), msg(2, 40, out=True, text="https://avito.ru/123456789"),
+                  msg(3, 35, sender=AVITO, text="По добавленному поиску 2 объявления",
+                      links=[{"url": "https://www.avito.ru/sankt-peterburg/hdd"}]),
+                  self.listing(4), self.listing(5, age=7200, media="photo"))
+        self.d.process(AVITO, "events")
+        self.d.process(AVITO, "scan")
+        self.assertEqual([(a["message_id"], a["to_chat_id"], a["topic_id"], a["expand_album"])
+                          for a in self.mcp.forwarded], [(4, CONCLAVE, TOPIC, False), (5, CONCLAVE, TOPIC, False)])
+        self.assertEqual((self.cur.relays[AVITO]["cursor"], self.runs), (5, []))  # a relay source is never answered
+        self.assertEqual(list(self.d.reviews), [])  # no relay_review.md: forwarding only
+
+    def test_bot_source_is_watched_by_events_and_the_scan(self):
+        self.d.seq = 10
+        self.mcp.events = [{"chat_id": AVITO, "chat_type": "private", "sender_bot": True}]
+        self.d.poll_events(0)
+        self.assertIn(AVITO, self.d.pending)
+        self.d.pending.clear()
+        self.cur.bots.add(AVITO)
+        self.mcp.dialogs = None  # list_chats breaks: relay sources are still scheduled
+        with self.assertRaises(Exception):
+            self.d.periodic()
+        self.assertIn(AVITO, self.d.pending)
+
+    def test_failed_forward_is_retried_then_skipped_with_a_notice(self):
+        self.start(0)
+        self.chat(AVITO, "private", self.listing(1), self.listing(2))
+        self.mcp.forward_error = "An error occurred (code: FWD-1). Check mcp_errors.log for details."
+        for attempt in range(D.RELAY_TRIES - 1):
+            self.d.process(AVITO, "events")
+            self.assertEqual(self.cur.relays[AVITO]["cursor"], 0)
+            self.assertGreaterEqual(self.d.pending[AVITO]["last"] - time.monotonic(), D.RETRY * 2 ** attempt - 1)
+        self.d.process(AVITO, "events")
+        self.assertEqual([a["chat_id"] for n, a in self.mcp.calls if n == "send_message"], [OWNER])
+        self.assertEqual(self.cur.relays[AVITO]["cursor"], 1)  # 1 skipped; 2 failed once and waits
+        self.mcp.forward_error = None
+        self.d.process(AVITO, "events")
+        self.assertEqual(self.cur.relays[AVITO]["cursor"], 2)
+        self.assertEqual([a["message_id"] for a in self.mcp.forwarded][-1], 2)
+
+    def test_review_runs_once_per_listing_after_due_chats(self):
+        config.CONFIG_DIR.mkdir()
+        (config.CONFIG_DIR / D.RELAY_REVIEW).write_text("Оцени фото диска.")
+        self.start(0)
+        self.chat(AVITO, "private", self.listing(1, media="photo"), self.listing(2))
+        self.d.process(AVITO, "events")
+        self.assertEqual([(c, r["id"], r["topic"], r["forwarded"]) for _, _, c, r, _ in self.d.reviews],
+                         [(CONCLAVE, 901, TOPIC, True), (CONCLAVE, 902, TOPIC, True)])
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertEqual(self.runs, [{"kind": "relay", "cid": CONCLAVE, "ids": [901], "context": [], "who": None}])
+        self.d.step()
+        self.assertEqual([r["ids"] for r in self.runs], [[901], [902]])
+
+    def test_backlog_goes_in_batches_and_reviews_are_dropped_with_their_rule(self):
+        config.CONFIG_DIR.mkdir()
+        (config.CONFIG_DIR / D.RELAY_REVIEW).write_text("Оцени.")
+        self.start(0)
+        self.chat(AVITO, "private", *[self.listing(i) for i in range(1, D.RELAY_BATCH + 4)])
+        self.d.process(AVITO, "events")
+        self.assertEqual((len(self.mcp.forwarded), self.cur.relays[AVITO]["cursor"]), (D.RELAY_BATCH, D.RELAY_BATCH))
+        self.assertIn(AVITO, self.d.pending)
+        self.d.process(AVITO, "events")
+        self.assertEqual(len(self.mcp.forwarded), D.RELAY_BATCH + 3)
+        self.cfg["RELAYS"] = ""
+        self.d.next_scan, self.d.seq = time.monotonic() + 999, 10
+        self.d.step()
+        self.assertEqual(self.runs, [])
+
+    def test_relay_task_and_prompt(self):
+        config.CONFIG_DIR.mkdir()
+        (config.CONFIG_DIR / D.RELAY_REVIEW).write_text("Оцени фото диска.")
+        config.MEMORY.write_text("- секрет владельца")
+        rec = dict(self.listing(1), id=901, topic=TOPIC, forwarded=True)
+        t = D.task("relay", CONCLAVE, [rec], [], self.cfg)
+        for part in ("Оцени фото диска.", '"id": 901', '"forwarded": true', "reply_to"):
+            self.assertIn(part, t)
+        text = D.instructions(self.cfg, "relay")
+        self.assertIn("Пересылка", text)
+        for private in ("секрет владельца", "Иван", "owner_x"):
+            self.assertNotIn(private, text)
 
 
 class Execute(Base):
