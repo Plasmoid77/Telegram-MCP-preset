@@ -314,6 +314,9 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
     except Exception as e:
         return {"ok": False, "started": False, "error": type(e).__name__}
     deadline, attempt, summary = time.monotonic() + timeout, 0, {}
+    fallback = cfg.get("FALLBACK_MODEL", "").strip()
+    fallback = fallback if fallback and fallback != cfg.get("MODEL", "") else ""
+    run_cfg = cfg
     while True:
         attempt += 1
         try:  # nothing has reached Telegram yet if this fails: the caller may retry the burst
@@ -328,7 +331,7 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
         t0, err = time.monotonic(), ""
         try:
             with broker.Broker(run) as b:
-                ok, rc, transient, err = harnesses.run(cfg, owner, prompt, text, b.url, run.catalog,
+                ok, rc, transient, err = harnesses.run(run_cfg, owner, prompt, text, b.url, run.catalog,
                                                        max(1, deadline - time.monotonic()), retry=attempt > 1)
         except subprocess.TimeoutExpired:
             ok, rc, transient = False, "timeout", False
@@ -338,16 +341,25 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
             ok, rc, transient = False, None, False
         summary = {"ok": ok, "rc": rc, "attempt": attempt, "sent": run.sent, "calls": run.calls,
                    "effects": run.effects, "searches": run.searches, "opened": run.fetched, "s": round(time.monotonic() - t0)}
+        if run_cfg is not cfg:
+            summary["model"] = run_cfg["MODEL"]
         if kind == "relay":
             summary["decision"] = run.decision
             if run.decision is not None:
                 break
         if err and not ok:
             summary["stderr"] = repr(err[-200:])
-        if (ok or attempt > 1 or run.effects or run.searches or run.fetched or not (transient or run.calls == 0)
+        # A model error (a provider's content filter, an outage) is worth one more try on the
+        # fallback model; the same model only gets one after a transient error or no call at all.
+        if (ok or attempt > 1 or run.effects or run.searches or run.fetched
+                or not (fallback or transient or run.calls == 0)
                 or deadline - time.monotonic() < 30 or paused()):
             break
-        log(f"chat={cid} {kind}: run failed before doing anything, retrying once")
+        if fallback:
+            run_cfg = dict(cfg, MODEL=fallback)
+            log(f"chat={cid} {kind}: run failed before doing anything, retrying once with {fallback}")
+        else:
+            log(f"chat={cid} {kind}: run failed before doing anything, retrying once")
     if not summary["ok"] and owner and not summary["effects"]:
         try:
             Mcp(upstream_url).tool_result("send_message", {
@@ -835,7 +847,8 @@ def check():
     except Exception as e:
         print(f"CHECK FAILED: {e}", file=sys.stderr)
         return 1
-    print(f"CHECK OK: harness={cfg['HARNESS']} model={cfg.get('MODEL') or '-'} account={cfg['SELF_ID']}")
+    print(f"CHECK OK: harness={cfg['HARNESS']} model={cfg.get('MODEL') or '-'} "
+          f"fallback={cfg.get('FALLBACK_MODEL') or '-'} account={cfg['SELF_ID']}")
     return 0
 
 

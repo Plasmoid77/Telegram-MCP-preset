@@ -30,6 +30,7 @@ DEFAULTS = {
     "MCP_URL": "http://127.0.0.1:8765/mcp",
     "HARNESS": "claude",
     "MODEL": "",
+    "FALLBACK_MODEL": "",
     "MAX_TURNS": "15",
     "RUN_TIMEOUT": "300",
     "OWNER_MAX_TURNS": "40",

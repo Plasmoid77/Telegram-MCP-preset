@@ -706,6 +706,52 @@ class Execute(Base):
         s, calls = self.execute([R(False, 1, True), R(True, 0, False)])
         self.assertEqual((s["ok"], calls), (True, [False, True]))
 
+    def test_model_error_is_retried_once_on_the_fallback_model(self):
+        R, models = D.harnesses.Result, []
+        self.cfg["FALLBACK_MODEL"] = "p/backup"
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            models.append(cfg["MODEL"])
+            D.broker.Run.last.call("get_messages", {"chat_id": GUEST})  # read, then the provider refused
+            return R(len(models) == 2, 0 if len(models) == 2 else 1, False)
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            s = D.execute("http://x", self.cfg, "guest", GUEST, [msg(1, 1, sender=GUEST)], [])
+        self.assertEqual(models, [self.cfg["MODEL"], "p/backup"])
+        self.assertEqual((s["ok"], s["attempt"], s["model"]), (True, 2, "p/backup"))
+
+    def test_without_fallback_a_model_error_after_a_call_is_not_retried(self):
+        R = D.harnesses.Result
+        self.cfg["FALLBACK_MODEL"] = self.cfg["MODEL"]  # the same model is no fallback
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            D.broker.Run.last.call("get_messages", {"chat_id": GUEST})
+            return R(False, 1, False)
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake) as run, \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            s = D.execute("http://x", self.cfg, "guest", GUEST, [msg(1, 1, sender=GUEST)], [])
+        self.assertEqual((run.call_count, s["attempt"]), (1, 1))
+
+    def test_fallback_is_not_used_after_an_effect(self):
+        R = D.harnesses.Result
+        self.cfg["FALLBACK_MODEL"] = "p/backup"
+        s, calls = self.execute([R(False, 1, False)], send=True)
+        self.assertEqual(calls, [False])
+
     def test_no_retry_and_no_notice_after_an_effect(self):
         R = D.harnesses.Result
         s, calls = self.execute([R(False, 1, True)], send=True)
