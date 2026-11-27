@@ -92,6 +92,7 @@ CALL_TOOL = tool("call_telegram_tool", "Call a Telegram tool found with find_tel
 
 
 RELAY_MEDIA = ("open_photo", "get_media_info", "transcribe_voice", "view_video")  # no documents: unbounded parsing
+RELAY_MEDIA_ARGS = {"view_video": {"start", "end", "max_frames", "transcribe"}}  # beyond chat_id, message_id
 RELAY_DECIDE = tool("relay_decide", "Your decision on the message: forward it or not, why (one short line for "
                     "the owner's log), and the comment to post under the forwarded message (empty when none "
                     "is asked for). Call it once.",
@@ -377,11 +378,13 @@ class Run:
         return text_result("Decision recorded. Nothing else to do.")
 
     def relay_media(self, name, args):
-        """A media tool, only for the message being decided on."""
-        if (policy.chat_ref(args.get("chat_id")) != self.chat or args.get("message_id") != self.message_id
-                or set(args) - {"chat_id", "message_id"}):
+        """A media tool, only for the message being decided on (view_video may zoom into a part)."""
+        checked = None
+        if isinstance(args, dict) and set(args) - {"chat_id", "message_id"} <= RELAY_MEDIA_ARGS.get(name, set()):
+            checked = policy.check("chat", name, args, self.chat, False)
+        if checked is None or checked.get("message_id") != self.message_id:
             return text_result(f"Only message {self.message_id} of chat {self.chat} can be looked at here.", True)
-        result = self.upstream.tool_result(name, {"chat_id": self.chat, "message_id": self.message_id}, timeout=180)
+        result = self.upstream.tool_result(name, checked, timeout=180)
         return self.paginate(result)
 
     def chat_info(self, ref):

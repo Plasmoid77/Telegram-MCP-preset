@@ -701,6 +701,35 @@ class Execute(Base):
         self.assertTrue(seen["other"] and seen["send"])
         self.assertEqual(self.upstream.calls, [("open_photo", {"chat_id": GUEST, "message_id": 1})])
 
+    def test_relay_run_may_zoom_into_its_video_only(self):
+        R = D.harnesses.Result
+        rule = relays.clean({"source": GUEST, "target": GROUP, "select": "видео", "comment": "что на нём"})
+        seen = {}
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            run = D.broker.Run.last
+            run.catalog["view_video"] = {"name": "view_video"}  # the fake server has no view_video
+            seen["zoom"] = run.call("view_video", {"chat_id": str(GUEST), "message_id": 1, "start": 10,
+                                                   "end": 20.5, "max_frames": 99, "transcribe": False})["isError"]
+            seen["other"] = run.call("view_video", {"chat_id": GUEST, "message_id": 2, "start": 1})["isError"]
+            seen["photo_id"] = run.call("open_photo", {"chat_id": GUEST, "message_id": 1, "photo_id": 7})["isError"]
+            seen["account"] = run.call("view_video", {"chat_id": GUEST, "message_id": 1, "account": "x"})["isError"]
+            run.call("relay_decide", {"forward": False, "reason": "нет"})
+            return R(True, 0, False)
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            D.execute("http://x", self.cfg, "relay", GUEST, [msg(1, 1, sender=GUEST)], [], rule=rule)
+        self.assertEqual(seen, {"zoom": False, "other": True, "photo_id": True, "account": True})
+        self.assertEqual(self.upstream.calls, [("view_video", {"chat_id": GUEST, "message_id": 1, "start": 10,
+                                                               "end": 20.5, "max_frames": 24, "transcribe": False})])
+
     def test_transient_failure_before_any_effect_is_retried_once(self):
         R = D.harnesses.Result
         s, calls = self.execute([R(False, 1, True), R(True, 0, False)])
