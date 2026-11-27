@@ -40,7 +40,7 @@ cd ~/.local/share/telegram-agent
 `install.sh` делает следующее:
 
 1. Клонирует `https://github.com/chigwell/telegram-mcp` в `~/.local/share/telegram-mcp`, ставит
-   тег `v3.3.23` (другой: `TELEGRAM_MCP_REF=vX.Y.Z ./install.sh`) и выполняет `uv sync`.
+   тег `v3.3.35` (другой: `TELEGRAM_MCP_REF=vX.Y.Z ./install.sh`) и выполняет `uv sync`.
    **Только из git:** пакет `telegram-mcp` на PyPI — чужой проект с тем же именем.
 2. Создаёт `~/.local/share/telegram-mcp/.env` (600) из `server/env.example`.
 3. Создаёт `~/.config/telegram-agent/` (700) с `config.env` и `backend.env` (600) из шаблонов,

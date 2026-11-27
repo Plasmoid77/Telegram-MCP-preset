@@ -7,7 +7,7 @@ and in selected groups, flags important conversations for the owner, and carries
 requests in Telegram: reading and summarising chats, replying, forwarding, managing folders.
 
 The installer fetches [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp) from
-upstream at the verified tag `v3.3.23`. This repository supplies the auto-responder, the server
+upstream at the verified tag `v3.3.35`. This repository supplies the auto-responder, the server
 configuration, local speech recognition, systemd units and the guides.
 
 > Use a separate Telegram account for the assistant. The AI acts as that account.
@@ -23,7 +23,8 @@ configuration, local speech recognition, systemd units and the guides.
   a guest's DM or a group, even when the owner asks there — works only with its own chat and can
   notify the owner. The limit is enforced in code, not only in the prompt.
 - **Rich media and the web.** Voice messages and video notes are transcribed locally (onnx-asr,
-  GigaAM-v3 by default); photos, documents and videos can be inspected; public web search
+  GigaAM-v3 by default); photos and documents can be inspected, and videos watched: frames at
+  scene changes plus a timestamped transcript on one timeline (`view_video`); public web search
   (DuckDuckGo, no key) works in every run, and runs the owner started can open web links
   (pages and images; public addresses only, only links already seen in the conversation).
 - **Memory and persona.** The owner can ask the assistant to remember instructions. The default
@@ -103,4 +104,4 @@ v1 of this preset was verified live with Claude Code (Arch Linux) and with OpenC
 ## License
 
 [GPL-3.0-or-later](LICENSE). The installer fetches telegram-mcp separately under its
-[Apache-2.0 license](https://github.com/chigwell/telegram-mcp/blob/v3.3.23/LICENSE).
+[Apache-2.0 license](https://github.com/chigwell/telegram-mcp/blob/v3.3.35/LICENSE).

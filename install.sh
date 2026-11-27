@@ -13,7 +13,7 @@
 set -euo pipefail
 
 UPSTREAM=https://github.com/chigwell/telegram-mcp.git
-REF=${TELEGRAM_MCP_REF:-v3.3.23}          # the tag this preset was verified with
+REF=${TELEGRAM_MCP_REF:-v3.3.35}          # the tag this preset was verified with
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MCP_DIR=$HOME/.local/share/telegram-mcp
 CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/telegram-agent
