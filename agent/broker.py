@@ -382,9 +382,12 @@ class Run:
         checked = None
         if isinstance(args, dict) and set(args) - {"chat_id", "message_id"} <= RELAY_MEDIA_ARGS.get(name, set()):
             checked = policy.check("chat", name, args, self.chat, False)
-        if checked is None or checked.get("message_id") != self.message_id:
-            return text_result(f"Only message {self.message_id} of chat {self.chat} can be looked at here.", True)
-        result = self.upstream.tool_result(name, checked, timeout=180)
+        mid = checked.get("message_id") if checked else None
+        if checked is None or isinstance(mid, bool) or not isinstance(mid, int) or mid != self.message_id:
+            return text_result(f"Only message {self.message_id} of chat {self.chat} can be looked at here "
+                               "(view_video: start/end in seconds, start < end; transcribe true/false).", True)
+        result = self.upstream.tool_result(name, dict(checked, chat_id=self.chat, message_id=self.message_id),
+                                           timeout=180)
         return self.paginate(result)
 
     def chat_info(self, ref):

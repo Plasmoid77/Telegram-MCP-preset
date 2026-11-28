@@ -37,6 +37,7 @@ DM_CONTEXT, GROUP_CONTEXT = 12, 15   # earlier messages shown with a burst
 TEXT_CHARS = 1500     # per message in the task
 RETRY = 30            # s before a chat whose read failed is read again
 RATE_RETRY = 120      # s before a rate-limited burst is tried again (it stays unread)
+FALLBACK_RESERVE = 120  # s of a run's time kept for FALLBACK_MODEL (at most a third of it)
 RELAY_TRIES = 5       # failed forwards of one message (30, 60, 120, 240 s apart) before it is skipped
 RELAY_BATCH = 10      # forwards per pass over a source: a backlog does not hold up the other chats
 RELAY_QUEUE = 100     # messages waiting for a model decision per source; beyond that: forwarded as is
@@ -316,6 +317,9 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
     deadline, attempt, summary = time.monotonic() + timeout, 0, {}
     fallback = cfg.get("FALLBACK_MODEL", "").strip()
     fallback = fallback if fallback and fallback != cfg.get("MODEL", "") else ""
+    # A primary that hangs (provider down, network stalls) must not eat the fallback's time.
+    reserve = min(FALLBACK_RESERVE, max(40, timeout // 3), timeout // 2) if fallback else 0
+    first_deadline, min_left = deadline - reserve, min(30, reserve // 2) if reserve else 30
     run_cfg = cfg
     while True:
         attempt += 1
@@ -332,7 +336,8 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
         try:
             with broker.Broker(run) as b:
                 ok, rc, transient, err = harnesses.run(run_cfg, owner, prompt, text, b.url, run.catalog,
-                                                       max(1, deadline - time.monotonic()), retry=attempt > 1)
+                                                       max(1, (first_deadline if attempt == 1 else deadline)
+                                                           - time.monotonic()), retry=attempt > 1)
         except subprocess.TimeoutExpired:
             ok, rc, transient = False, "timeout", False
         except (OSError, ValueError, KeyError) as e:  # the CLI could not be prepared or started
@@ -351,15 +356,18 @@ def execute(upstream_url, cfg, kind, cid, new, context, who=None, rule=None):
             summary["stderr"] = repr(err[-200:])
         # A model error (a provider's content filter, an outage) is worth one more try on the
         # fallback model; the same model only gets one after a transient error or no call at all.
-        if (ok or attempt > 1 or run.effects or run.searches or run.fetched
+        # A relay run that ended without a decision failed too (it has no effects to repeat).
+        if (ok and kind != "relay" or attempt > 1 or run.effects or run.searches or run.fetched
                 or not (fallback or transient or run.calls == 0)
-                or deadline - time.monotonic() < 30 or paused()):
+                or deadline - time.monotonic() < min_left or paused()):
             break
         if fallback:
             run_cfg = dict(cfg, MODEL=fallback)
             log(f"chat={cid} {kind}: run failed before doing anything, retrying once with {fallback}")
         else:
             log(f"chat={cid} {kind}: run failed before doing anything, retrying once")
+    if kind == "relay" and summary.get("decision") is None:
+        summary["ok"] = False  # a relay run is only done when it decided
     if not summary["ok"] and owner and not summary["effects"]:
         try:
             Mcp(upstream_url).tool_result("send_message", {

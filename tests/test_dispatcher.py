@@ -1,5 +1,6 @@
 """dispatcher.py: history-based delivery, scopes, limits, prompts. Fake MCP, no network."""
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -711,7 +712,8 @@ class Execute(Base):
             run.catalog["view_video"] = {"name": "view_video"}  # the fake server has no view_video
             seen["zoom"] = run.call("view_video", {"chat_id": str(GUEST), "message_id": 1, "start": 10,
                                                    "end": 20.5, "max_frames": 99, "transcribe": False})["isError"]
-            seen["other"] = run.call("view_video", {"chat_id": GUEST, "message_id": 2, "start": 1})["isError"]
+            seen["other"] = all(run.call("view_video", {"chat_id": GUEST, "message_id": m, "start": 1})["isError"]
+                                for m in (2, True, 1.0, "1"))
             seen["photo_id"] = run.call("open_photo", {"chat_id": GUEST, "message_id": 1, "photo_id": 7})["isError"]
             seen["account"] = run.call("view_video", {"chat_id": GUEST, "message_id": 1, "account": "x"})["isError"]
             run.call("relay_decide", {"forward": False, "reason": "нет"})
@@ -728,7 +730,7 @@ class Execute(Base):
             D.execute("http://x", self.cfg, "relay", GUEST, [msg(1, 1, sender=GUEST)], [], rule=rule)
         self.assertEqual(seen, {"zoom": False, "other": True, "photo_id": True, "account": True})
         self.assertEqual(self.upstream.calls, [("view_video", {"chat_id": GUEST, "message_id": 1, "start": 10,
-                                                               "end": 20.5, "max_frames": 24, "transcribe": False})])
+                                                               "end": 20.5, "max_frames": 16, "transcribe": False})])
 
     def test_transient_failure_before_any_effect_is_retried_once(self):
         R = D.harnesses.Result
@@ -755,6 +757,52 @@ class Execute(Base):
             s = D.execute("http://x", self.cfg, "guest", GUEST, [msg(1, 1, sender=GUEST)], [])
         self.assertEqual(models, [self.cfg["MODEL"], "p/backup"])
         self.assertEqual((s["ok"], s["attempt"], s["model"]), (True, 2, "p/backup"))
+
+    def test_a_hung_primary_leaves_time_for_the_fallback(self):
+        R = D.harnesses.Result
+        for run_timeout, first, second in (("300", 200, 100), ("60", 30, 30), ("900", 780, 120)):
+            seen, clock = [], [1000.0]
+            self.cfg.update(FALLBACK_MODEL="p/backup", RUN_TIMEOUT=run_timeout)
+
+            def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+                seen.append((cfg["MODEL"], timeout))
+                if len(seen) == 1:
+                    clock[0] += timeout + 2  # the primary hangs until killed (+ teardown)
+                    raise subprocess.TimeoutExpired("agent", timeout)
+                return R(True, 0, False)
+
+            with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                    mock.patch.object(D.time, "monotonic", lambda: clock[0]):
+                s = D.execute("http://x", self.cfg, "guest", GUEST, [msg(1, 1, sender=GUEST)], [])
+            self.assertEqual([m for m, _ in seen], [self.cfg["MODEL"], "p/backup"], run_timeout)
+            self.assertEqual((round(seen[0][1]), round(seen[1][1]) + 2, s["ok"]), (first, second, True), run_timeout)
+
+    def test_relay_run_without_a_decision_is_retried_on_the_fallback(self):
+        R, models = D.harnesses.Result, []
+        self.cfg["FALLBACK_MODEL"] = "p/backup"
+        rule = relays.clean({"source": GUEST, "target": GROUP, "select": "объявления"})
+
+        def fake(cfg, owner, prompt, text, url, tools, timeout, retry=False):
+            models.append(cfg["MODEL"])
+            if len(models) == 2:
+                D.broker.Run.last.call("relay_decide", {"forward": False, "reason": "нет"})
+            return R(True, 0, False)  # the first run ended cleanly but never decided
+
+        init = D.broker.Run.__init__
+
+        def remember(run, *a, **kw):
+            init(run, *a, **kw)
+            D.broker.Run.last = run
+
+        with mock.patch.object(D.harnesses, "run", side_effect=fake), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            s = D.execute("http://x", self.cfg, "relay", GUEST, [msg(1, 1, sender=GUEST)], [], rule=rule)
+        self.assertEqual(models, [self.cfg["MODEL"], "p/backup"])
+        self.assertEqual(s["decision"], {"forward": False, "reason": "нет", "comment": ""})
+        with mock.patch.object(D.harnesses, "run", return_value=R(True, 0, False)), \
+                mock.patch.object(D.broker.Run, "__init__", remember):
+            s = D.execute("http://x", self.cfg, "relay", GUEST, [msg(1, 1, sender=GUEST)], [], rule=rule)
+        self.assertEqual((s["ok"], s["decision"], s["attempt"]), (False, None, 2))
 
     def test_without_fallback_a_model_error_after_a_call_is_not_retried(self):
         R = D.harnesses.Result
