@@ -25,7 +25,7 @@ configuration, local speech recognition, systemd units and the guides.
 - **Rich media and the web.** Voice messages and video notes are transcribed locally (onnx-asr,
   GigaAM-v3 by default); photos and documents can be inspected, and videos watched: frames at
   scene changes plus a timestamped transcript on one timeline (`view_video`); public web search
-  (DuckDuckGo, no key) works in every run, and runs the owner started can open web links
+  (DuckDuckGo, no key) works in every reply run, and runs the owner started can open web links
   (pages and images; public addresses only, only links already seen in the conversation).
 - **Memory and persona.** The owner can ask the assistant to remember instructions. The default
   persona is the Russian-speaking «Doom bot» in the manner of JARVIS; replace it with your own

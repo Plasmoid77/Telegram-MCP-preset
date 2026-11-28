@@ -30,7 +30,7 @@ CHAT_TOOLS = {
     "open_photo": ({"chat_id", "photo_id", "message_id"}, {}),
     "inspect_document": ({"chat_id", "message_id"}, {}),
     "transcribe_voice": ({"chat_id", "message_id"}, {}),
-    "view_video": ({"chat_id", "message_id", "start", "end", "max_frames", "transcribe"}, {"max_frames": 24}),
+    "view_video": ({"chat_id", "message_id", "start", "end", "max_frames", "transcribe"}, {"max_frames": 16}),
     "send_message": ({"chat_id", "message", "parse_mode", "reply_to", "silent"}, {}),
     "reply_to_message": ({"chat_id", "message_id", "text", "parse_mode", "silent"}, {}),
     "send_reaction": ({"chat_id", "message_id", "emoji", "big"}, {}),
@@ -131,7 +131,20 @@ def check(scope, name, args, chat, private):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 return None
             args[key] = min(value, cap)
+    if name == "view_video" and not video_window(args):
+        return None
     return args
+
+
+def video_window(args):
+    """start/end are seconds (0 <= start < end), transcribe is true/false: the server would only
+    fail on anything else after downloading the whole video."""
+    def seconds(v):  # NaN and infinities fail the comparison, huge integers the bound
+        return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 10 ** 7)
+    start, end = args.get("start"), args.get("end")
+    if not (seconds(start) and seconds(end)) or (end is not None and end <= (start or 0)):
+        return False
+    return "transcribe" not in args or isinstance(args["transcribe"], bool)
 
 
 def stays_in_chat(name, args, chat):

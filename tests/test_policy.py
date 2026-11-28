@@ -19,6 +19,16 @@ class ChatScope(unittest.TestCase):
         self.assertEqual(self.check("send_message", {"chat_id": CHAT, "message": "hi", "reply_to": 5}),
                          {"chat_id": CHAT, "message": "hi", "reply_to": 5})
 
+    def test_video_window_must_be_sane_seconds(self):
+        ok = {"chat_id": CHAT, "message_id": 5, "start": 0, "end": 12.5, "max_frames": 99, "transcribe": False}
+        self.assertEqual(self.check("view_video", ok), dict(ok, max_frames=16))
+        self.assertEqual(self.check("view_video", {"chat_id": CHAT, "message_id": 5, "end": 3}),
+                         {"chat_id": CHAT, "message_id": 5, "end": 3})
+        for bad in ({"start": -1}, {"start": 5, "end": 5}, {"start": float("nan")}, {"end": float("inf")},
+                    {"start": True}, {"start": "10"}, {"transcribe": "yes"}, {"transcribe": None},
+                    {"end": 0}, {"start": 10 ** 400}, {"start": 3, "end": 2}):
+            self.assertIsNone(self.check("view_video", dict({"chat_id": CHAT, "message_id": 5}, **bad)), bad)
+
     def test_other_chat_is_denied_everywhere(self):
         for name in policy.CHAT_TOOLS:
             with self.subTest(name):
